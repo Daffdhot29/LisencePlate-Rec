@@ -27,11 +27,13 @@ def correct_plate_format(ocr_text) :
             elif ch.isalpha() : 
                 corrected.append(ch)
             else : 
-                return
+                return ""
         else : 
             if ch.isdigit() and ch in mapping_alpha_to_num : 
                 corrected.append(mapping_alpha_to_num[ch])
             elif ch.isalpha() : 
                 corrected.append(ch)
             else : 
-                return 
+                return ""
+    
+    return "".join(corrected)
