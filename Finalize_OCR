@@ -73,4 +73,5 @@ def get_stable_plate(box_id, new_text) :
     if new_text : 
         plate_history[box_id].append(new_text)
 
-        most_common = max
+        most_common = max(set(plate_history[box_id]), key=plate_history[box_id].count)
+        
