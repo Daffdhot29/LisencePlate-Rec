@@ -46,3 +46,10 @@ def recognize_plate(plate_crop) :
 
     # Preproccess OCR 
     gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
+    _, thresh = cv2.threshold(gray,0,255,cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    plate_resized = cv2.resize(thresh, None, fx=2, fy = 2, interpolation=cv2.INTER_CUBIC)
+
+    try : 
+        ocr_result = reader.readtext(
+            plate_resized, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+        )
