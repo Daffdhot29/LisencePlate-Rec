@@ -53,3 +53,12 @@ def recognize_plate(plate_crop) :
         ocr_result = reader.readtext(
             plate_resized, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
         )
+        if len(ocr_result) > 0 : 
+            candidate = correct_plate_format(ocr_result[0])
+            if candidate and plate_pattern.match(candidate) : 
+                return candidate
+    
+    except : 
+        pass 
+    return ""
+    
