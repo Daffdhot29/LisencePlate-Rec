@@ -4,3 +4,10 @@ from collections import defaultdict, deque
 import easyocr 
 import numpy as np 
 import cv2 
+
+
+model = YOLO('license_plate_best.pt')
+reader = easyocr.Reader(['en'], gpu=True)
+
+# Pola Plat Indonesia
+plate_pattern = re.compile(r'^[A-Z]{1,2}\s?\d{1,4}\s?[A-Z]{0,3}$')
