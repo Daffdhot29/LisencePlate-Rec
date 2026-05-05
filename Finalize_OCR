@@ -61,4 +61,16 @@ def recognize_plate(plate_crop) :
     except : 
         pass 
     return ""
-    
+
+plate_history = defaultdict(lambda: deque(maxlen=10))
+
+plate_final = {}
+
+def get_box(x1,x2,y1,y2) : 
+    return f"{int(x1/10)}_{int(x2/10)}_{int(y1/10)}_{int(y2/10)}"
+
+def get_stable_plate(box_id, new_text) : 
+    if new_text : 
+        plate_history[box_id].append(new_text)
+
+        most_common = max
