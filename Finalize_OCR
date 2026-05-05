@@ -39,3 +39,8 @@ def correct_plate_format(ocr_text) :
             else : 
                 return ""
     return "".join(corrected)
+
+def recognize_plate(plate_crop) : 
+    if plate_crop.size() == 0 :
+        return ""
+    
