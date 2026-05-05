@@ -41,6 +41,8 @@ def correct_plate_format(ocr_text) :
     return "".join(corrected)
 
 def recognize_plate(plate_crop) : 
-    if plate_crop.size() == 0 :
+    if plate_crop.size == 0 :
         return ""
-    
+
+    # Preproccess OCR 
+    gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
