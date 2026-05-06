@@ -80,9 +80,16 @@ def get_stable_plate(box_id, new_text) :
 
 
 # Inferecing Snapshot 
-input_foto = ""
-output_foto = ""
+input_foto = "input.jpg"
+output_foto = "output.jpg"
 
-capturePhot = cv2.VideoCapture(0)
-fourcc = cv2.VideoWriter(*'.jpg')
+img = cv2.imread(input_foto)
+if img is None:
+    print("Gambar tidak ditemukan!")
+    exit()
+processed = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+cv2.imwrite(output_foto, processed)
+print("Output berhasil disimpan di:", output_foto)
+
+CONF_THRESH = 0.3
 
