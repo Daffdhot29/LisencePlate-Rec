@@ -1,5 +1,4 @@
 import re
-from tabnanny import verbose 
 from ultralytics import YOLO 
 from collections import defaultdict, deque 
 import easyocr 
@@ -103,4 +102,25 @@ while img :
 
     for r in results : 
         boxes = r.boxes
-        for 
+        for  box in boxes : 
+            conf = float(box.conf.gpu().numpy())
+            if conf < CONF_THRESH :
+                continue
+
+            x1,x2,y1,y2 = map(int, box.xyxy.gpu().numpy()[0])
+            plate_crop = frame[y1:y2,x1:x2]
+
+            # OCR With Correction
+            text = recognize_plate(plate_crop)
+
+            # Stabilize text using history 
+            box_id = get_box(x1,x2,y1,y2)
+            stable_text = get_stable_plate(box_id, text)
+
+            # Draw simple rectangle around license plate 
+            cv2.rectangle(frame, (x1,y1), (x2,y2),(0,255,0),3)
+
+            if plate_crop.size > 0 : 
+                overlay_h, overlay_w = 150,400
+                
+

@@ -34,7 +34,7 @@ def correct_plate_format(ocr_text) :
             elif ch.isalpha() : 
                 corrected.append(ch)
             else : 
-                return ""
+                return "" 
     
     return "".join(corrected)
 
