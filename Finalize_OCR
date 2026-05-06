@@ -94,5 +94,8 @@ cv2.imwrite(output_foto, img)
 CONF_THRESH = 0.3
 
 # Opening frame by frame
-
-
+while img : 
+    ret, frame = img
+    if not ret : 
+        break 
+    
