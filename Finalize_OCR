@@ -85,11 +85,14 @@ output_foto = "output.jpg"
 
 img = cv2.imread(input_foto)
 if img is None:
-    print("Gambar tidak ditemukan!")
-    exit()
-processed = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-cv2.imwrite(output_foto, processed)
-print("Output berhasil disimpan di:", output_foto)
+    raise ValueError("Input gambar tidak ditemukan")
+
+
+height, width = img.shape[:2]
+cv2.imwrite(output_foto, img)
 
 CONF_THRESH = 0.3
+
+# Opening frame by frame
+
 
