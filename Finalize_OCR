@@ -1,4 +1,5 @@
-import re 
+import re
+from tabnanny import verbose 
 from ultralytics import YOLO 
 from collections import defaultdict, deque 
 import easyocr 
@@ -98,4 +99,8 @@ while img :
     ret, frame = img
     if not ret : 
         break 
-    
+    results = model(frame, verbose=False)
+
+    for r in results : 
+        boxes = r.boxes
+        for 
