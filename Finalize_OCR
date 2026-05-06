@@ -122,5 +122,16 @@ while img :
 
             if plate_crop.size > 0 : 
                 overlay_h, overlay_w = 150,400
+                plate_resized = cv2.resize(plate_crop, (overlay_w, overlay_h))
+
+                oy1 = max(0, y1 - overlay_h - 40)
+                ox1 = x1 
+                oy2, ox2 = oy1 + overlay_h, ox1 + overlay_w
+
+                if oy2 <= frame.shape[0] and ox2 <= frame.shape[1] : 
+                    frame[oy1:oy2, ox1:ox2] = plate_resized
                 
+                    if stable_text : 
+                        cv2.putText()
+
 
