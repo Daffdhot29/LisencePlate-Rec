@@ -25,20 +25,15 @@ def correct_plate_format(ocr_text) :
 
     for i, ch in enumerate(ocr_text) : 
         if i < 2  : 
-            if ch.isdigit() and ch in mapping_num_to_alpha : 
-                corrected.append(mapping_num_to_alpha[ch])
-            elif ch.isalpha() : 
-                corrected.append(ch)
-            else : 
-                return ""
+            corrected.append(mapping_num_to_alpha.get(ch,ch))
+        elif ch.isalpha() : 
+            corrected.append(mapping_alpha_to_num.get(ch,ch))
         else : 
-            if ch.isdigit() and ch in mapping_alpha_to_num : 
-                corrected.append(mapping_alpha_to_num[ch])
-            elif ch.isalpha(): 
-                corrected.append(ch)
-            else : 
-                return ""
+            corrected.append(ch)
     return "".join(corrected)
+
+
+# OCR FUNCTION 
 
 def recognize_plate(plate_crop) : 
     if plate_crop.size == 0 :
@@ -46,8 +41,9 @@ def recognize_plate(plate_crop) :
 
     # Preproccess OCR 
     gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
-    _, thresh = cv2.threshold(gray,0,255,cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    plate_resized = cv2.resize(thresh, None, fx=2, fy = 2, interpolation=cv2.INTER_CUBIC)
+
+    thresh = cv2.adaptiveThreshold(gray, 255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,11,2)
+    plate_resized = cv2.resize(thresh, None, fx=2, fy = 2)
 
     try : 
         ocr_result = reader.readtext(
@@ -55,7 +51,7 @@ def recognize_plate(plate_crop) :
         )
         if len(ocr_result) > 0 : 
             candidate = correct_plate_format(ocr_result[0])
-            if candidate and plate_pattern.match(candidate) : 
+            if  plate_pattern.match(candidate) : 
                 return candidate
     
     except Exception as e: 
@@ -63,12 +59,13 @@ def recognize_plate(plate_crop) :
         pass
     return ""
 
+# LICENSE HISTORY 
 plate_history = defaultdict(lambda: deque(maxlen=10))
 
 plate_final = {}
 
 def get_box(x1,x2,y1,y2) : 
-    return f"{int(x1/10)}_{int(x2/10)}_{int(y1/10)}_{int(y2/10)}"
+    return f"{int(x1//10)}_{int(x2//10)}_{int(y1//10)}_{int(y2//10)}"
 
 def get_stable_plate(box_id, new_text) : 
     if new_text : 
@@ -112,17 +109,17 @@ for r in results :
         text = recognize_plate(plate_crop)
 
             # Stabilize text using history 
-        box_id = get_box(x1,x2,y1,y2)
+        box_id = get_box(x1,x2,y1,y2)    
         stable_text = get_stable_plate(box_id, text)
 
             # Draw simple rectangle around license plate 
         cv2.rectangle(frame, (x1,y1), (x2,y2),(0,255,0),3)
 
         if plate_crop.size > 0 : 
-            overlay_h, overlay_w = 150,400
+            overlay_h, overlay_w = 120,400
             plate_resized = cv2.resize(plate_crop, (overlay_w, overlay_h))
 
-            oy1 = max(0, y1 - overlay_h - 40)
+            oy1 = max(0, y1 - overlay_h - 10)
             ox1 = x1 
             oy2, ox2 = oy1 + overlay_h, ox1 + overlay_w
 
@@ -130,8 +127,8 @@ for r in results :
                 frame[oy1:oy2, ox1:ox2] = plate_resized
                 
                 if stable_text : 
-                    cv2.putText(frame, stable_text, (ox1,oy1-20),cv2.FONT_HERSHEY_SIMPLEX,2,(0,0,0),6)
-                    cv2.putText(frame, stable_text, (ox1,oy1-20),cv2.FONT_HERSHEY_SIMPLEX,2,(255,255,255),3)
+                    cv2.putText(frame, stable_text, (ox1,oy1-5),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,0),4)
+                    cv2.putText(frame, stable_text, (ox1,oy1-5),cv2.FONT_HERSHEY_SIMPLEX,1.2,(255,255,255),2)
 
 # simpan hasil
 cv2.imwrite(output_foto, frame)
