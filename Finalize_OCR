@@ -74,4 +74,12 @@ def get_stable_plate(box_id, new_text) :
         plate_history[box_id].append(new_text)
 
         most_common = max(set(plate_history[box_id]), key=plate_history[box_id].count)
-        
+        plate_final[box_id] = most_common
+
+    return plate_final.get(box_id, "") 
+
+
+# Inferecing Snapshot 
+input_foto = ""
+output_foto = ""
+
