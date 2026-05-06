@@ -58,8 +58,9 @@ def recognize_plate(plate_crop) :
             if candidate and plate_pattern.match(candidate) : 
                 return candidate
     
-    except : 
-        pass 
+    except Exception as e: 
+        print(f"OCR ERROR :{e}")
+        pass
     return ""
 
 plate_history = defaultdict(lambda: deque(maxlen=10))
@@ -100,7 +101,7 @@ while img :
         break 
     results = model(frame, verbose=False)
 
-    for r in results : 
+    for r in results :  
         boxes = r.boxes
         for  box in boxes : 
             conf = float(box.conf.gpu().numpy())
@@ -132,6 +133,8 @@ while img :
                     frame[oy1:oy2, ox1:ox2] = plate_resized
                 
                     if stable_text : 
-                        cv2.putText()
+                        cv2.putText(frame, stable_text, (ox1,oy1-20),cv2.FONT_HERSHEY_SIMPLEX,2,(0,0,0),6)
+                        cv2.putText(frame, stable_text, (ox1,oy1-20),cv2.FONT_HERSHEY_SIMPLEX,2,(255,255,255),3)
+        
 
 
