@@ -39,3 +39,4 @@ def correct_plate_format(ocr_text) :
     return "".join(corrected)
 
 
+ 
