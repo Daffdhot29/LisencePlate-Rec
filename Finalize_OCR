@@ -135,6 +135,15 @@ while img :
                     if stable_text : 
                         cv2.putText(frame, stable_text, (ox1,oy1-20),cv2.FONT_HERSHEY_SIMPLEX,2,(0,0,0),6)
                         cv2.putText(frame, stable_text, (ox1,oy1-20),cv2.FONT_HERSHEY_SIMPLEX,2,(255,255,255),3)
-        
+    output_foto.write(frame)
+    cv2.imshow("Annotated Photo", frame)
+    if cv2.waitKey(1) & 0xFF == ord('q') :
+        break
 
+input_foto.release()
+output_foto.release()
+cv2.destroyAllWindows()
 
+print("Annotated Photo Saved", output_foto)
+
+ 
