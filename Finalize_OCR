@@ -42,17 +42,22 @@ def recognize_plate(plate_crop) :
     # Preproccess OCR 
     gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
 
-    thresh = cv2.adaptiveThreshold(gray, 255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,11,2)
-    plate_resized = cv2.resize(thresh, None, fx=2, fy = 2)
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+    _, thresh = cv2.threshold(blur, 0, 255,cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     try : 
+        plate_resized = cv2.resize(thresh, None, fx=2, fy=2)
+
         ocr_result = reader.readtext(
-            plate_resized, detail=0, allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
+            plate_resized,
+            detail=0,
+            allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
         )
-        if len(ocr_result) > 0 : 
-            candidate = correct_plate_format(ocr_result[0])
-            if  plate_pattern.match(candidate) : 
-                return candidate
+
+        print("RAW OCR:", ocr_result)
+
+        if len(ocr_result) > 0:
+            return correct_plate_format(ocr_result[0])
     
     except Exception as e: 
         print(f"OCR ERROR :{e}")
@@ -95,41 +100,47 @@ CONF_THRESH = 0.3
 # Opening frame by frame
 results = model(frame, verbose=False)
 
-for r in results :  
+for r in results:
     boxes = r.boxes
-    for box in boxes : 
+    for box in boxes:
         conf = float(box.conf.item())
-        if conf < CONF_THRESH :
-                continue
+        if conf < CONF_THRESH:
+            continue
 
-        x1,x2,y1,y2 = map(int, box.xyxy.cpu().numpy()[0])
-        plate_crop = frame[y1:y2,x1:x2]
+        #  KOORDINAT
+        x1, y1, x2, y2 = map(int, box.xyxy.cpu().numpy()[0])
 
-            # OCR With Correction
+        # BOUNDARY 
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = min(width, x2)
+        y2 = min(height, y2)
+        pad = 10
+
+        plate_crop = frame[
+        max(0,y1-pad):min(height,y2+pad),
+        max(0,x1-pad):min(width,x2+pad)
+        ]
+
+        # OCR
         text = recognize_plate(plate_crop)
 
-            # Stabilize text using history 
-        box_id = get_box(x1,x2,y1,y2)    
-        stable_text = get_stable_plate(box_id, text)
+        print("Detected Text:", text)
 
-            # Draw simple rectangle around license plate 
+        # DRAW BOX
         cv2.rectangle(frame, (x1,y1), (x2,y2),(0,255,0),3)
 
-        if plate_crop.size > 0 : 
-            overlay_h, overlay_w = 120,400
-            plate_resized = cv2.resize(plate_crop, (overlay_w, overlay_h))
+        if text:
+            label = text
 
-            oy1 = max(0, y1 - overlay_h - 10)
-            ox1 = x1 
-            oy2, ox2 = oy1 + overlay_h, ox1 + overlay_w
+            # text size 
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1,2)
 
-            if oy2 <= frame.shape[0] and ox2 <= frame.shape[1] : 
-                frame[oy1:oy2, ox1:ox2] = plate_resized
-                
-                if stable_text : 
-                    cv2.putText(frame, stable_text, (ox1,oy1-5),cv2.FONT_HERSHEY_SIMPLEX,1.2,(0,0,0),4)
-                    cv2.putText(frame, stable_text, (ox1,oy1-5),cv2.FONT_HERSHEY_SIMPLEX,1.2,(255,255,255),2)
-
+            # BG 
+            cv2.rectangle(frame, (x1,y1-th-10), (x1+tw,y1),(0,0,0), -1)
+            cv2.putText(frame, text, (x1, y1-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1,
+                        (0,255,0), 2)
 # simpan hasil
 cv2.imwrite(output_foto, frame)
 
