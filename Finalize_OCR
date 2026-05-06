@@ -18,13 +18,13 @@ def correct_plate_format(ocr_text) :
 
     ocr_text = ocr_text.upper().replace(" ","")
 
-    if len(ocr_text) !=7 : 
+    if len(ocr_text) < 5 : 
         return ""
     
     corrected = []
 
     for i, ch in enumerate(ocr_text) : 
-        if i < 2 or i == 4 : 
+        if i < 2  : 
             if ch.isdigit() and ch in mapping_num_to_alpha : 
                 corrected.append(mapping_num_to_alpha[ch])
             elif ch.isalpha() : 
@@ -101,11 +101,11 @@ results = model(frame, verbose=False)
 for r in results :  
     boxes = r.boxes
     for box in boxes : 
-        conf = float(box.conf.gpu().numpy())
+        conf = float(box.conf.item())
         if conf < CONF_THRESH :
                 continue
 
-        x1,x2,y1,y2 = map(int, box.xyxy.gpu().numpy()[0])
+        x1,x2,y1,y2 = map(int, box.xyxy.cpu().numpy()[0])
         plate_crop = frame[y1:y2,x1:x2]
 
             # OCR With Correction
@@ -135,12 +135,6 @@ for r in results :
 
 # simpan hasil
 cv2.imwrite(output_foto, frame)
-
-cv2.imshow("Annotated Photo", frame)
-
-
-cv2.waitKey(0)
-cv2.destroyAllWindows()
 
 print("Annotated Photo Saved:", output_foto)
 
