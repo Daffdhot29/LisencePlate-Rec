@@ -83,3 +83,6 @@ def get_stable_plate(box_id, new_text) :
 input_foto = ""
 output_foto = ""
 
+capturePhot = cv2.VideoCapture(0)
+fourcc = cv2.VideoWriter(*'.jpg')
+
