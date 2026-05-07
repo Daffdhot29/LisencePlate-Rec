@@ -56,7 +56,7 @@ def recognize_plate(plate_crop) :
 
         print("RAW OCR:", ocr_result)
 
-        if len(ocr_result) > 0:
+        if len(ocr_result) > 0:  
             return correct_plate_format(ocr_result[0])
     
     except Exception as e: 
