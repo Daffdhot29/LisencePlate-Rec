@@ -25,12 +25,24 @@ def correct_plate_format(ocr_text) :
 
     for i, ch in enumerate(ocr_text) : 
         if i < 2  : 
-            corrected.append(mapping_num_to_alpha.get(ch,ch))
-        elif ch.isalpha() : 
-            corrected.append(mapping_alpha_to_num.get(ch,ch))
+            if ch.isdigit() : 
+                corrected.append(mapping_num_to_alpha.get(ch,ch))
+            else : 
+                corrected.append(ch)
+        elif i < len(ocr_text) - 3 : 
+            if ch.isalpha() : 
+                corrected.append(mapping_alpha_to_num.get(ch,ch))
+            else : 
+                corrected.append(ch)
         else : 
-            corrected.append(ch)
-    return "".join(corrected)
+            if ch.isdigit() : 
+                corrected.append(mapping_num_to_alpha.get(ch,ch))
+            else : 
+                corrected.append(ch)
+    final_text = ''.join(corrected)
+    if plate_pattern.match(final_text): 
+        return final_text
+    return final_text
 
 
 # OCR FUNCTION 
@@ -47,9 +59,16 @@ def recognize_plate(plate_crop) :
     # blur = cv2.GaussianBlur(gray, (5,5), 0)
     thresh = cv2.adaptiveThreshold(gray, 255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,11,2)
 
-    try : 
-        plate_resized = cv2.resize(thresh, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+     # morphology
+    kernel = np.ones((3,3), np.uint8)
 
+    thresh = cv2.morphologyEx(
+        thresh,
+        cv2.MORPH_CLOSE,
+        kernel
+    )
+    plate_resized = cv2.resize(thresh, None, fx=4, fy=4, interpolation=cv2.INTER_CUBIC)
+    try : 
         ocr_result = reader.readtext(
             plate_resized,
             detail=0,
@@ -58,8 +77,11 @@ def recognize_plate(plate_crop) :
 
         print("RAW OCR:", ocr_result)
 
-        if len(ocr_result) > 0:  
-            return correct_plate_format(ocr_result[0])
+        if len(ocr_result) > 0: 
+
+            raw_text = ''.join(ocr_result)
+            raw_text = re.sub(r'[^A-Z0-9]','',raw_text) 
+            return correct_plate_format(raw_text)
     
     except Exception as e: 
         print(f"OCR ERROR :{e}")
@@ -97,7 +119,7 @@ height, width = img.shape[:2]
 cv2.imwrite(output_foto, img)
 
 frame = img.copy()
-CONF_THRESH = 0.3
+CONF_THRESH = 0.4
 
 # Opening frame by frame
 results = model(frame, verbose=False)
