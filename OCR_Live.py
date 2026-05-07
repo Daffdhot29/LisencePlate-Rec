@@ -25,7 +25,7 @@ def correct_plate_format(ocr_text) :
             if ch.isdigit() and ch in mapping_num_to_alpha :
                 corrected.append(mapping_num_to_alpha[ch])
             elif ch.isalpha() : 
-                corrected.append(ch)
+                corrected.append(ch)   
             else : 
                 return ""
         else : # number position 
