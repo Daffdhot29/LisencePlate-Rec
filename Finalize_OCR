@@ -145,5 +145,5 @@ for r in results:
 cv2.imwrite(output_foto, frame)
 
 print("Annotated Photo Saved:", output_foto)
-
+ 
  
