@@ -119,7 +119,7 @@ height, width = img.shape[:2]
 cv2.imwrite(output_foto, img)
 
 frame = img.copy()
-CONF_THRESH = 0.4
+CONF_THRESH = 0.5
 
 # Opening frame by frame
 results = model(frame, verbose=False)
