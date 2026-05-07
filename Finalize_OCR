@@ -6,7 +6,7 @@ import numpy as np
 import cv2 
 
 
-model = YOLO('license_plate_best.pt')
+model = YOLO('license_plate_best100.pt')
 reader = easyocr.Reader(['en'], gpu=True)
 
 # Pola Plat Indonesia
@@ -42,11 +42,13 @@ def recognize_plate(plate_crop) :
     # Preproccess OCR 
     gray = cv2.cvtColor(plate_crop, cv2.COLOR_BGR2GRAY)
 
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    _, thresh = cv2.threshold(blur, 0, 255,cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    gray = cv2.bilateralFilter(gray,11,17,17)
+
+    # blur = cv2.GaussianBlur(gray, (5,5), 0)
+    thresh = cv2.adaptiveThreshold(gray, 255,cv2.ADAPTIVE_THRESH_GAUSSIAN_C,cv2.THRESH_BINARY,11,2)
 
     try : 
-        plate_resized = cv2.resize(thresh, None, fx=2, fy=2)
+        plate_resized = cv2.resize(thresh, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
 
         ocr_result = reader.readtext(
             plate_resized,
@@ -145,5 +147,5 @@ for r in results:
 cv2.imwrite(output_foto, frame)
 
 print("Annotated Photo Saved:", output_foto)
- 
+
  
