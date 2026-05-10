@@ -9,7 +9,7 @@ import cv2
 
 start_time = time.time()
 
-model = YOLO('license_plate_best100.pt')
+model = YOLO('../models/license_plate_best50_new.pt')
 reader = easyocr.Reader(['en'], gpu=True)
 
 # Pola Plat Indonesia
@@ -21,7 +21,7 @@ def correct_plate_format(ocr_text) :
 
     ocr_text = ocr_text.upper().replace(" ","")
 
-    if len(ocr_text) < 5 : 
+    if len(ocr_text) < 5 :  
         return ""
     
     corrected = []
@@ -139,8 +139,8 @@ def get_stable_plate(box_id, new_text) :
 
 
 # Inferecing Snapshot 
-input_foto = "input.jpg"
-output_foto = "output.jpg"
+input_foto = "input2.jpg"
+output_foto = "output2.jpg"
 
 img = cv2.imread(input_foto)
 if img is None:
