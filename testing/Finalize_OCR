@@ -155,7 +155,7 @@ CONF_THRESH = 0.6
 
 # Opening frame by frame 
 results = model(frame, verbose=False)  
-
+ 
 for r in results:
     boxes = r.boxes
     for box in boxes:

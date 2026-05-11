@@ -28,7 +28,7 @@ class YOLOService:
         detected_plates = []
 
         results = self.model(
-            frame,
+            frame, 
             verbose=False,
             device=0
         )
