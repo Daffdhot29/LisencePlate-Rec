@@ -9,7 +9,7 @@ class YOLOService:
     def __init__(self):
 
         self.model = YOLO(
-            "../models/license_plate_best50.pt"
+            "../models/license_plate_best_new.pt"
         )
 
         self.ocr_service = OCRService()
