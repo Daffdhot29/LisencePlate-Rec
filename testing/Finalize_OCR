@@ -176,7 +176,7 @@ for r in results:
         plate_crop = frame[
         max(0,y1-pad):min(height,y2+pad),
         max(0,x1-pad):min(width,x2+pad)
-        ]
+        ] 
 
         # OCR
         text = recognize_plate(plate_crop)
