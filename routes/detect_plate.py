@@ -4,12 +4,12 @@ import numpy as np
 import cv2
 import time
 
-router = APIRouter()
+router = APIRouter(prefix="/recognize")
 
 yolo_service = YOLOService()
 
 
-@router.post("/plate")
+@router.post("/detect-plate")
 async def detect_plate(file: UploadFile = File(...)):
 
     start_time = time.time()

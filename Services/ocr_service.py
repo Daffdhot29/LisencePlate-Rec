@@ -1,40 +1,31 @@
 import easyocr
 import cv2
 import re
-
-from Utils.image_preprocessing import (
-    ImagePreprocessing
-)
-
-from Utils.plate_regex import (
-    PlateRegex
-)
+from Utils.image_preprocessing import ImagePreprocessing
+from Utils.plate_regex import PlateRegex
 
 
 class OCRService:
 
     def __init__(self):
 
+        # 🔥 pilih salah satu: CPU lebih stabil
         self.reader = easyocr.Reader(
             ['en'],
-            gpu=True
+            gpu=False
         )
 
         self.preprocessing = ImagePreprocessing()
-
         self.regex = PlateRegex()
 
-    def recognize_plate(
-        self,
-        plate_crop
-    ):
+    def recognize_plate(self, plate_crop):
 
-        if plate_crop.size == 0:
+        if plate_crop is None or plate_crop.size == 0:
             return ""
 
-        variants = self.preprocessing.preprocess(
-            plate_crop
-        )
+        variants = self.preprocessing.preprocess(plate_crop)
+
+        best_text = ""
 
         for idx, variant in enumerate(variants):
 
@@ -55,43 +46,22 @@ class OCRService:
                     allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
                 )
 
-                print(
-                    f"OCR Variant {idx}:",
-                    ocr_result
-                )
+                print(f"OCR Variant {idx}:", ocr_result)
 
-                if len(ocr_result) >= 3:
+                if len(ocr_result) == 0:
+                    continue
 
-                    raw_text = ''.join(
-                        ocr_result[:3]
-                    )
+                raw_text = ''.join(ocr_result)
 
-                    raw_text = re.sub(
-                        r'[^A-Z0-9]',
-                        '',
-                        raw_text
-                    )
+                raw_text = re.sub(r'[^A-Z0-9]', '', raw_text)
 
-                    print(
-                        "CLEAN TEXT:",
-                        raw_text
-                    )
+                print("CLEAN TEXT:", raw_text)
 
-                    if self.regex.validate(
-                        raw_text
-                    ):
-
-                        print(
-                            "VALID PLATE:",
-                            raw_text
-                        )
-
-                        return raw_text
+                if len(raw_text) >= 5:
+                    best_text = raw_text
+                    break
 
             except Exception as e:
+                print(f"OCR ERROR Variant {idx}: {e}")
 
-                print(
-                    f"OCR ERROR Variant {idx}: {e}"
-                )
-
-        return ""
+        return best_text
