@@ -25,9 +25,6 @@ class OCRService:
         text = re.sub(r'[^A-Z0-9]', '', text)
         return text
 
-    # =========================
-    # MAIN OCR FUNCTION
-    # =========================
     def recognize_plate(self, plate_crop):
 
         if plate_crop is None or plate_crop.size == 0:

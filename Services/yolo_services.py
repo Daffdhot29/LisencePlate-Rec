@@ -10,7 +10,7 @@ class YOLOService:
     def __init__(self):
 
         model_path = os.path.abspath(
-            "models/license_plate_best50.pt"
+            "models/license_plate_M.pt"
         )
 
         self.model = YOLO(model_path)
