@@ -9,7 +9,6 @@ class OCRService:
 
     def __init__(self):
 
-        # 🔥 pilih salah satu: CPU lebih stabil
         self.reader = easyocr.Reader(
             ['en'],
             gpu=False
@@ -18,6 +17,17 @@ class OCRService:
         self.preprocessing = ImagePreprocessing()
         self.regex = PlateRegex()
 
+    # =========================
+    # CLEAN TEXT
+    # =========================
+    def _clean_text(self, text):
+        text = text.upper()
+        text = re.sub(r'[^A-Z0-9]', '', text)
+        return text
+
+    # =========================
+    # MAIN OCR FUNCTION
+    # =========================
     def recognize_plate(self, plate_crop):
 
         if plate_crop is None or plate_crop.size == 0:
@@ -26,11 +36,11 @@ class OCRService:
         variants = self.preprocessing.preprocess(plate_crop)
 
         best_text = ""
+        best_score = 0.0
 
         for idx, variant in enumerate(variants):
 
             try:
-
                 plate_resized = cv2.resize(
                     variant,
                     None,
@@ -39,27 +49,56 @@ class OCRService:
                     interpolation=cv2.INTER_CUBIC
                 )
 
+               
                 ocr_result = self.reader.readtext(
                     plate_resized,
-                    detail=0,
+                    detail=1,
                     paragraph=False,
                     allowlist='ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
                 )
 
-                print(f"OCR Variant {idx}:", ocr_result)
-
-                if len(ocr_result) == 0:
+                if not ocr_result:
                     continue
 
-                raw_text = ''.join(ocr_result)
+           
+                ocr_result = sorted(
+                    ocr_result,
+                    key=lambda x: x[0][0][0]
+                )
 
-                raw_text = re.sub(r'[^A-Z0-9]', '', raw_text)
+           
+                raw_text = ""
+                total_conf = 0.0
 
-                print("CLEAN TEXT:", raw_text)
+                for (_, text, conf) in ocr_result:
+                    text = self._clean_text(text)
 
-                if len(raw_text) >= 5:
+                    if not text:
+                        continue
+
+                    raw_text += text
+                    total_conf += float(conf)
+
+                if len(raw_text) < 4:
+                    continue
+
+                avg_conf = total_conf / max(len(ocr_result), 1)
+
+                
+                structure_bonus = 0.3 if self.regex.validate(raw_text) else 0.0
+
+                # length stability bonus
+                length_bonus = min(len(raw_text) / 8.0, 1.0) * 0.1
+
+             
+                score = (avg_conf * 0.6) + structure_bonus + length_bonus
+
+                print(f"OCR Variant {idx}: {raw_text} | SCORE: {score}")
+
+  
+                if score > best_score:
+                    best_score = score
                     best_text = raw_text
-                    break
 
             except Exception as e:
                 print(f"OCR ERROR Variant {idx}: {e}")

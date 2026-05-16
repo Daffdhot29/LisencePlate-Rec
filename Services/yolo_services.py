@@ -10,7 +10,7 @@ class YOLOService:
     def __init__(self):
 
         model_path = os.path.abspath(
-            "models/license_plate_bestM.pt"
+            "models/license_plate_best50.pt"
         )
 
         self.model = YOLO(model_path)
@@ -18,31 +18,22 @@ class YOLOService:
         self.ocr_service = OCRService()
         self.plate_history = PlateHistory()
 
-        self.conf_thresh = 0.05
+        self.conf_thresh = 0.25  
 
     def detect_plate(self, frame):
 
         height, width = frame.shape[:2]
 
-        detected_plates = []
-
-        
         results = self.model(frame, verbose=False)
 
-        print("TOTAL RESULTS:", len(results))
+        plate_candidates = {}
 
         for r in results:
+            for box in r.boxes:
 
-            print("BOXES:", len(r.boxes))
+                yolo_conf = float(box.conf.item())
 
-            boxes = r.boxes
-
-            for box in boxes:
-
-                conf = float(box.conf.item())
-                print("CONF:", conf)
-
-                if conf < self.conf_thresh:
+                if yolo_conf < self.conf_thresh:
                     continue
 
                 x1, y1, x2, y2 = map(
@@ -55,7 +46,7 @@ class YOLOService:
                 x2 = min(width, x2)
                 y2 = min(height, y2)
 
-                pad = 2
+                pad = 5
 
                 plate_crop = frame[
                     max(0, y1 - pad):min(height, y2 + pad),
@@ -65,28 +56,38 @@ class YOLOService:
                 if plate_crop.size == 0:
                     continue
 
+             
                 text = self.ocr_service.recognize_plate(plate_crop)
 
+                if not text:
+                    continue
+
+        
                 box_id = self.plate_history.get_box(
                     x1, x2, y1, y2
                 )
 
-                stable_text = self.plate_history.get_stable_plate(  
+                # simpan history OCR (bukan YOLO conf)
+                stable_text = self.plate_history.get_stable_plate(
                     box_id,
                     text
                 )
 
-                if stable_text:
+                if not stable_text:
+                    continue
 
-                    detected_plates.append({
+          
+                if box_id not in plate_candidates:
+                    plate_candidates[box_id] = {
                         "plate_number": stable_text,
-                        "confidence": round(conf, 2),
-                        "bbox": {
-                            "x1": x1,
-                            "y1": y1,
-                            "x2": x2,
-                            "y2": y2
-                        }
-                    })
+                        "yolo_conf": round(yolo_conf, 2)
+                    }
 
-        return detected_plates
+                else:
+                    if len(stable_text) > len(plate_candidates[box_id]["plate_number"]):
+                        plate_candidates[box_id] = {
+                            "plate_number": stable_text,
+                            "yolo_conf": round(yolo_conf, 2)
+                        }
+
+        return list(plate_candidates.values())
