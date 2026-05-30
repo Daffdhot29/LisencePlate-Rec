@@ -5,7 +5,7 @@ import cv2
 import easyocr
 from ultralytics import YOLO
 
-from app.utils.plate_utils import (
+from Utils.plate_utils import (
     get_box,
     format_plate,
     recognize_plate,
