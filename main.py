@@ -1,19 +1,30 @@
+import os
 import re
 import cv2
 import time
+import uuid
 import numpy as np
 import onnxruntime as ort
+
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
 from paddleocr import PaddleOCR
 
 
+app = FastAPI(title="ALPR API")
+
 MODEL_PATH = "models/vehicle_plate_yolov9tiny_best.onnx"
-IMAGE_PATH = "input3.jpg"
-OUTPUT_PATH = "output3.jpg"
+
+UPLOAD_DIR = "uploads"
+OUTPUT_DIR = "outputs"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 IMG_SIZE = 640
 CONF_THRESH = 0.35
 IOU_THRESH = 0.45
-PAD = 12
+PAD = 4
 
 CLASS_NAMES = [
     "License_Plate",
@@ -25,13 +36,31 @@ CLASS_NAMES = [
 LICENSE_PLATE_CLASS_ID = 0
 
 plate_pattern = re.compile(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$")
+plate_search_pattern = re.compile(r"[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}")
 
 
 ocr = PaddleOCR(
-     use_angle_cls=True,
+    use_angle_cls=True,
     lang="en",
     show_log=False
 )
+
+
+def get_onnx_providers():
+    available = ort.get_available_providers()
+
+    if "CUDAExecutionProvider" in available:
+        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+    return ["CPUExecutionProvider"]
+
+
+session = ort.InferenceSession(
+    MODEL_PATH,
+    providers=get_onnx_providers()
+)
+
+input_name = session.get_inputs()[0].name
 
 
 def clean_text(text):
@@ -41,14 +70,24 @@ def clean_text(text):
 
 
 def format_plate(text):
+    text = clean_text(text)
+
     match = re.match(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{1,3})$", text)
+
     if match:
         return f"{match.group(1)} {match.group(2)} {match.group(3)}"
+
     return text
 
 
 def fix_plate_by_position(text):
     text = clean_text(text)
+
+    if len(text) < 4:
+        return text
+
+    if plate_pattern.match(text):
+        return text
 
     to_digit = {
         "O": "0", "Q": "0", "D": "0",
@@ -76,10 +115,40 @@ def fix_plate_by_position(text):
     return "".join(chars)
 
 
-def preprocess_plate_for_ocr(crop):
+def extract_indonesian_plate(text):
+    text = clean_text(text)
+    match = plate_search_pattern.search(text)
+
+    if match:
+        return match.group(0)
+
+    return text
+
+
+def score_plate(text, conf):
+    text = clean_text(text)
+
+    if plate_pattern.fullmatch(text):
+        return conf + 0.50
+
+    if plate_search_pattern.search(text):
+        return conf + 0.25
+
+    if len(text) >= 4:
+        return conf
+
+    return conf - 0.50
+
+
+def preprocess_variants_for_ocr(crop):
+    variants = []
+
+    if crop is None or crop.size == 0:
+        return variants
+
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
 
-    gray = cv2.resize(
+    resized = cv2.resize(
         gray,
         None,
         fx=3,
@@ -87,75 +156,110 @@ def preprocess_plate_for_ocr(crop):
         interpolation=cv2.INTER_CUBIC
     )
 
-    clahe = cv2.createCLAHE(
+    clahe_img = cv2.createCLAHE(
         clipLimit=3.0,
         tileGridSize=(8, 8)
+    ).apply(resized)
+
+    kernel = np.array([
+        [-1, -1, -1],
+        [-1,  9, -1],
+        [-1, -1, -1]
+    ])
+
+    sharp = cv2.filter2D(clahe_img, -1, kernel)
+
+    _, otsu = cv2.threshold(
+        sharp,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
 
-    enhanced = clahe.apply(gray)
-
-    enhanced = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
-
-    return enhanced
-
-def extract_indonesian_plate(text):
-    text = clean_text(text)
-
-    pattern = re.search(
-        r"[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}",
-        text
+    adaptive = cv2.adaptiveThreshold(
+        sharp,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        11,
+        2
     )
 
-    if pattern:
-        return pattern.group(0)
+    variants.append(cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR))
+    variants.append(cv2.cvtColor(clahe_img, cv2.COLOR_GRAY2BGR))
+    variants.append(cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR))
+    variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
+    variants.append(cv2.cvtColor(adaptive, cv2.COLOR_GRAY2BGR))
 
-    return text
+    return variants
+
+
+def run_ocr(image):
+    try:
+        result = ocr.ocr(image, cls=True)
+
+        if not result or not result[0]:
+            return "", 0.0
+
+        texts = []
+        confs = []
+
+        for line in result[0]:
+            text = clean_text(line[1][0])
+            conf = float(line[1][1])
+
+            if text:
+                texts.append(text)
+                confs.append(conf)
+
+        if not texts:
+            return "", 0.0
+
+        joined_text = clean_text("".join(texts))
+        avg_conf = sum(confs) / len(confs)
+
+        return joined_text, avg_conf
+
+    except Exception as e:
+        print("OCR ERROR:", e)
+        return "", 0.0
 
 
 def recognize_plate(crop):
-    if crop is None or crop.size == 0:
-        return "", 0.0
+    variants = preprocess_variants_for_ocr(crop)
 
-    processed = preprocess_plate_for_ocr(crop)
+    best_text = ""
+    best_conf = 0.0
+    best_score = -999
 
-    result = ocr.ocr(processed,cls=True)
+    for variant in variants:
+        raw_text, conf = run_ocr(variant)
 
-    if not result or not result[0]:
-        return "", 0.0
+        if not raw_text:
+            continue
 
-    texts = []
-    confs = []
+        fixed_text = fix_plate_by_position(raw_text)
+        extracted_text = extract_indonesian_plate(fixed_text)
 
-    for line in result[0]:
-        text = line[1][0]
-        conf = float(line[1][1])
+        current_score = score_plate(extracted_text, conf)
 
-        text = clean_text(text)
+        if current_score > best_score:
+            best_score = current_score
+            best_text = extracted_text
+            best_conf = conf
 
-        if text:
-            texts.append(text)
-            confs.append(conf)
-
-    if not texts:
-        return "", 0.0
-
-    joined_text = clean_text("".join(texts))
-    fixed_text = fix_plate_by_position(joined_text)
-    fixed_text = extract_indonesian_plate(fixed_text)
-
-    avg_conf = sum(confs) / len(confs)
-
-    return fixed_text, avg_conf
+    return best_text, best_conf
 
 
 def letterbox(image, new_shape=640):
     h, w = image.shape[:2]
 
     scale = min(new_shape / h, new_shape / w)
-    nh, nw = int(h * scale), int(w * scale)
+
+    nh = int(h * scale)
+    nw = int(w * scale)
 
     resized = cv2.resize(image, (nw, nh))
-
     canvas = np.full((new_shape, new_shape, 3), 114, dtype=np.uint8)
 
     top = (new_shape - nh) // 2
@@ -179,6 +283,7 @@ def preprocess_detector(image):
 
 def xywh_to_xyxy(box):
     x, y, w, h = box
+
     return [
         x - w / 2,
         y - h / 2,
@@ -241,6 +346,8 @@ def postprocess(outputs, original_image, scale, pad_x, pad_y):
     detections = []
 
     if len(indices) > 0:
+        indices = np.array(indices).flatten()
+
         for i in indices:
             x, y, w, h = boxes[i]
 
@@ -268,20 +375,8 @@ def draw_label(frame, x1, y1, x2, y2, text, color):
     )
 
 
-def main():
+def process_image(image, request_id):
     start_time = time.time()
-
-    image = cv2.imread(IMAGE_PATH)
-
-    if image is None:
-        raise ValueError(f"Gambar tidak ditemukan: {IMAGE_PATH}")
-
-    session = ort.InferenceSession(
-        MODEL_PATH,
-        providers=["CUDAExecutionProvider", "CPUExecutionProvider"]
-    )
-
-    input_name = session.get_inputs()[0].name
 
     input_tensor, scale, pad_x, pad_y = preprocess_detector(image)
 
@@ -307,11 +402,19 @@ def main():
         class_id = det["class_id"]
         class_name = det["class_name"]
         det_conf = det["det_confidence"]
+
         x1, y1, x2, y2 = det["box"]
 
         if class_id != LICENSE_PLATE_CLASS_ID:
-            label = f"{class_name} {det_conf:.2f}"
-            draw_label(frame, x1, y1, x2, y2, label, (255, 0, 0))
+            draw_label(
+                frame,
+                x1,
+                y1,
+                x2,
+                y2,
+                f"{class_name} {det_conf:.2f}",
+                (255, 0, 0)
+            )
             continue
 
         crop_x1 = max(0, x1 - PAD)
@@ -321,17 +424,13 @@ def main():
 
         plate_crop = image[crop_y1:crop_y2, crop_x1:crop_x2]
 
-        crop_path = f"plate_crop_{idx}.jpg"
+        crop_filename = f"{request_id}_plate_crop_{idx}.jpg"
+        crop_path = os.path.join(OUTPUT_DIR, crop_filename)
         cv2.imwrite(crop_path, plate_crop)
 
         plate_text, ocr_conf = recognize_plate(plate_crop)
 
-        if plate_text:
-            display_text = format_plate(plate_text)
-        else:
-            display_text = "Plate Unreadable"
-
-        label = f"{display_text} | D:{det_conf:.2f} OCR:{ocr_conf:.2f}"
+        display_text = format_plate(plate_text) if plate_text else "Plate Unreadable"
 
         draw_label(
             frame,
@@ -339,7 +438,7 @@ def main():
             y1,
             x2,
             y2,
-            label,
+            f"{display_text} | D:{det_conf:.2f} OCR:{ocr_conf:.2f}",
             (0, 255, 0)
         )
 
@@ -348,31 +447,59 @@ def main():
             "raw_plate": plate_text,
             "det_confidence": round(det_conf, 4),
             "ocr_confidence": round(ocr_conf, 4),
-            "box": [x1, y1, x2, y2],
-            "crop_file": crop_path
         })
 
-        print("PLATE:", display_text)
-        print("DET CONF:", round(det_conf, 4))
-        print("OCR CONF:", round(ocr_conf, 4))
-        print("CROP:", crop_path)
-        print("-" * 40)
+    output_filename = f"{request_id}_output.jpg"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+    cv2.imwrite(output_path, frame)
 
-    cv2.imwrite(OUTPUT_PATH, frame)
+    process_time = time.time() - start_time
 
-    end_time = time.time()
-    process_time = end_time - start_time
-
-    response = {
+    return {
         "success": True,
         "processing_time_seconds": round(process_time, 3),
         "total_detected": len(results),
         "results": results,
-        "output_file": OUTPUT_PATH
+        "output_file": output_filename
     }
 
-    print(response)
+
+@app.get("/")
+def root():
+    return {
+        "message": "ALPR API is running",
+        "endpoint": "POST /recognize"
+    }
 
 
-if __name__ == "__main__":
-    main()
+@app.post("/recognize")
+async def recognize(file: UploadFile = File(...)):
+    try:
+        request_id = str(uuid.uuid4())
+
+        file_bytes = await file.read()
+
+        np_arr = np.frombuffer(file_bytes, np.uint8)
+        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+        if image is None:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "File bukan gambar valid"
+                }
+            )
+
+        result = process_image(image, request_id)
+
+        return result
+
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "error": str(e)
+            }
+        )
