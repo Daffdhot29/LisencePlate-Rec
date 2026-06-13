@@ -1,25 +1,16 @@
-import os
 import re
 import cv2
 import time
-import uuid
 import numpy as np
 import onnxruntime as ort
+import streamlit as st
 
-from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import JSONResponse
+from PIL import Image
 from paddleocr import PaddleOCR
 
 
-app = FastAPI(title="ALPR API")
 
 MODEL_PATH = "models/vehicle_plate_yolov9tiny_best.onnx"
-
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "outputs"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 IMG_SIZE = 640
 CONF_THRESH = 0.35
@@ -39,28 +30,32 @@ plate_pattern = re.compile(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$")
 plate_search_pattern = re.compile(r"[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}")
 
 
-ocr = PaddleOCR(
-    use_angle_cls=True,
-    lang="en",
-    show_log=False
-)
+@st.cache_resource
+def load_models():
+    ocr_model = PaddleOCR(
+        use_angle_cls=True,
+        lang="en",
+        show_log=False
+    )
+
+    providers = ort.get_available_providers()
+
+    if "CUDAExecutionProvider" in providers:
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    else:
+        providers = ["CPUExecutionProvider"]
+
+    session = ort.InferenceSession(
+        MODEL_PATH,
+        providers=providers
+    )
+
+    input_name = session.get_inputs()[0].name
+
+    return session, input_name, ocr_model, providers
 
 
-def get_onnx_providers():
-    available = ort.get_available_providers()
-
-    if "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
-
-    return ["CPUExecutionProvider"]
-
-
-session = ort.InferenceSession(
-    MODEL_PATH,
-    providers=get_onnx_providers()
-)
-
-input_name = session.get_inputs()[0].name
+session, input_name, ocr, active_providers = load_models()
 
 
 def clean_text(text):
@@ -90,16 +85,24 @@ def fix_plate_by_position(text):
         return text
 
     to_digit = {
-        "O": "0", "Q": "0", "D": "0",
-        "I": "1", "L": "1",
-        "Z": "2", "S": "5",
-        "G": "6", "B": "8"
+        "O": "0",
+        "Q": "0",
+        "D": "0",
+        "I": "1",
+        "L": "1",
+        "Z": "2",
+        "S": "5",
+        "G": "6",
+        "B": "8"
     }
 
     to_letter = {
-        "0": "O", "1": "I",
-        "2": "Z", "5": "S",
-        "6": "G", "8": "B"
+        "0": "O",
+        "1": "I",
+        "2": "Z",
+        "5": "S",
+        "6": "G",
+        "8": "B"
     }
 
     chars = list(text)
@@ -220,8 +223,7 @@ def run_ocr(image):
 
         return joined_text, avg_conf
 
-    except Exception as e:
-        print("OCR ERROR:", e)
+    except Exception:
         return "", 0.0
 
 
@@ -372,6 +374,26 @@ def get_vehicle_type(detections):
     return "Unknown"
 
 
+def draw_label(frame, x1, y1, x2, y2, text, color):
+    cv2.rectangle(
+        frame,
+        (x1, y1),
+        (x2, y2),
+        color,
+        2
+    )
+
+    cv2.putText(
+        frame,
+        text,
+        (x1, y1 - 10 if y1 > 30 else y2 + 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        color,
+        2
+    )
+
+
 def process_image(image):
     start_time = time.time()
 
@@ -392,6 +414,7 @@ def process_image(image):
 
     vehicle_type = get_vehicle_type(detections)
 
+    frame = image.copy()
     h_img, w_img = image.shape[:2]
 
     best_plate = "Plate Unreadable"
@@ -400,11 +423,20 @@ def process_image(image):
     for det in detections:
         class_id = det["class_id"]
 
-        if class_id != LICENSE_PLATE_CLASS_ID:
-            continue
-
-        det_conf = det["det_confidence"]
         x1, y1, x2, y2 = det["box"]
+        det_conf = det["det_confidence"]
+
+        if class_id != LICENSE_PLATE_CLASS_ID:
+            draw_label(
+                frame,
+                x1,
+                y1,
+                x2,
+                y2,
+                det["class_name"],
+                (255, 0, 0)
+            )
+            continue
 
         crop_x1 = max(0, x1 - PAD)
         crop_y1 = max(0, y1 - PAD)
@@ -423,57 +455,105 @@ def process_image(image):
                 best_score = current_score
                 best_plate = display_text
 
+            draw_label(
+                frame,
+                x1,
+                y1,
+                x2,
+                y2,
+                display_text,
+                (0, 255, 0)
+            )
+        else:
+            draw_label(
+                frame,
+                x1,
+                y1,
+                x2,
+                y2,
+                "Plate Unreadable",
+                (0, 255, 255)
+            )
+
     process_time = time.time() - start_time
 
     return {
         "plate": best_plate,
         "vehicle_type": vehicle_type,
-        "processing_time_seconds": round(process_time, 3)
+        "processing_time_seconds": round(process_time, 3),
+        "output_image": frame
     }
 
 
-@app.get("/")
-def root():
-    return {
-        "message": "ALPR API is running",
-        "endpoint": "POST /recognize",
-        "response_fields": [
-            "plate",
-            "vehicle_type",
-            "processing_time_seconds"
-        ]
-    }
+# =========================
+# STREAMLIT UI
+# =========================
+st.set_page_config(
+    page_title="ALPR Vehicle Recognition",
+    page_icon="🚗",
+    layout="wide"
+)
 
+st.title("ALPR Vehicle Recognition")
+st.caption("Snapshot ALPR dengan jarak efektif ±1 meter")
 
-@app.post("/recognize")
-async def recognize(file: UploadFile = File(...)):
-    try:
-        file_bytes = await file.read()
+with st.sidebar:
+    st.header("System Info")
+    st.write("Model: YOLOv9-tiny ONNX")
+    st.write("OCR: PaddleOCR")
+    st.write("Effective Distance: ±1 meter")
+    st.write("ONNX Provider:")
+    st.code(str(active_providers))
 
-        np_arr = np.frombuffer(file_bytes, np.uint8)
-        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+uploaded_file = st.file_uploader(
+    "Upload gambar kendaraan",
+    type=["jpg", "jpeg", "png"]
+)
 
-        if image is None:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "plate": "Plate Unreadable",
-                    "vehicle_type": "Unknown",
-                    "processing_time_seconds": 0.0
-                }
+if uploaded_file is not None:
+    pil_image = Image.open(uploaded_file).convert("RGB")
+    image_rgb = np.array(pil_image)
+    image_bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+
+    st.subheader("Input Image")
+    st.image(
+        image_rgb,
+        use_container_width=True
+    )
+
+    if st.button("Recognize Plate"):
+        with st.spinner("Processing ALPR..."):
+            result = process_image(image_bgr)
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric(
+                "Plate",
+                result["plate"]
             )
 
-        result = process_image(image)
+        with col2:
+            st.metric(
+                "Vehicle Type",
+                result["vehicle_type"]
+            )
 
-        return result
+        with col3:
+            st.metric(
+                "Processing Time",
+                f'{result["processing_time_seconds"]} sec'
+            )
 
-    except Exception as e:
-        return JSONResponse(
-            status_code=500,
-            content={
-                "plate": "Plate Unreadable",
-                "vehicle_type": "Unknown",
-                "processing_time_seconds": 0.0,
-                "error": str(e)
-            }
+        output_rgb = cv2.cvtColor(
+            result["output_image"],
+            cv2.COLOR_BGR2RGB
         )
+
+        st.subheader("Output Image")
+        st.image(
+            output_rgb,
+            use_container_width=True
+        )
+else:
+    st.info("Upload gambar kendaraan terlebih dahulu.")
