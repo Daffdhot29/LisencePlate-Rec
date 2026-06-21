@@ -13,7 +13,7 @@ from paddleocr import PaddleOCR
 
 app = FastAPI(title="ALPR API")
 
-MODEL_PATH = "models/vehicle_plate_yolov9tiny_best.onnx"
+MODEL_PATH = "koushik-ai/yolov8-license-plate-detection/best.pt"
 
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "outputs"
