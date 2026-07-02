@@ -11,9 +11,9 @@ from fastapi.responses import JSONResponse
 from paddleocr import PaddleOCR
 
 
-app = FastAPI(title="ALPR API")
+app = FastAPI(title="ALPR API")   
 
-MODEL_PATH = "models/vehicle_plate_yolov9tiny_2nd.onnx"
+MODEL_PATH = "models/vehicle_plate_yolov9tiny_best.onnx"
 
 UPLOAD_DIR = "uploads"
 OUTPUT_DIR = "outputs"
@@ -21,10 +21,10 @@ OUTPUT_DIR = "outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-IMG_SIZE = 640
+IMG_SIZE = 960
 CONF_THRESH = 0.35
 IOU_THRESH = 0.45
-PAD = 4
+PAD = 2
 
 CLASS_NAMES = [
     "License_Plate",
@@ -37,6 +37,7 @@ LICENSE_PLATE_CLASS_ID = 0
 
 plate_pattern = re.compile(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$")
 plate_search_pattern = re.compile(r"[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}")
+
 
 
 ocr = PaddleOCR(
@@ -69,24 +70,10 @@ def clean_text(text):
     return text
 
 
-def format_plate(text):
-    text = clean_text(text)
-
-    match = re.match(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{1,3})$", text)
-
-    if match:
-        return f"{match.group(1)} {match.group(2)} {match.group(3)}"
-
-    return text
-
-
 def fix_plate_by_position(text):
     text = clean_text(text)
 
     if len(text) < 4:
-        return text
-
-    if plate_pattern.match(text):
         return text
 
     to_digit = {
@@ -103,10 +90,10 @@ def fix_plate_by_position(text):
     }
 
     chars = list(text)
-
     for i in range(len(chars)):
         if 1 <= i <= 5:
             chars[i] = to_digit.get(chars[i], chars[i])
+
 
     for i in range(len(chars)):
         if i >= 5:
@@ -117,24 +104,38 @@ def fix_plate_by_position(text):
 
 def extract_indonesian_plate(text):
     text = clean_text(text)
-    match = plate_search_pattern.search(text)
 
-    if match:
-        return match.group(0)
+    candidates = plate_search_pattern.findall(text)
 
-    return text
+    if not candidates:
+        return text
+    candidates = sorted(
+        candidates,
+        key=lambda x: (
+            plate_pattern.fullmatch(x) is not None,
+            6 <= len(x) <= 9,
+            len(x)
+        ),
+        reverse=True
+    )
+
+    return candidates[0]
+
+
+def format_plate(text):
+    return clean_text(text)
 
 
 def score_plate(text, conf):
     text = clean_text(text)
 
     if plate_pattern.fullmatch(text):
-        return conf + 0.50
+        return conf + 0.60
 
     if plate_search_pattern.search(text):
-        return conf + 0.25
+        return conf + 0.30
 
-    if len(text) >= 4:
+    if 5 <= len(text) <= 10:
         return conf
 
     return conf - 0.50
@@ -156,10 +157,12 @@ def preprocess_variants_for_ocr(crop):
         interpolation=cv2.INTER_CUBIC
     )
 
-    clahe_img = cv2.createCLAHE(
+    clahe = cv2.createCLAHE(
         clipLimit=3.0,
         tileGridSize=(8, 8)
-    ).apply(resized)
+    )
+
+    clahe_img = clahe.apply(resized)
 
     kernel = np.array([
         [-1, -1, -1],
@@ -181,15 +184,20 @@ def preprocess_variants_for_ocr(crop):
         255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
         cv2.THRESH_BINARY,
-        11,
-        2
+        15,
+        3
     )
+
+    inverted_otsu = cv2.bitwise_not(otsu)
+    inverted_adaptive = cv2.bitwise_not(adaptive)
 
     variants.append(cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR))
     variants.append(cv2.cvtColor(clahe_img, cv2.COLOR_GRAY2BGR))
     variants.append(cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR))
     variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
     variants.append(cv2.cvtColor(adaptive, cv2.COLOR_GRAY2BGR))
+    variants.append(cv2.cvtColor(inverted_otsu, cv2.COLOR_GRAY2BGR))
+    variants.append(cv2.cvtColor(inverted_adaptive, cv2.COLOR_GRAY2BGR))
 
     return variants
 
@@ -199,33 +207,28 @@ def run_ocr(image):
         result = ocr.ocr(image, cls=True)
 
         if not result or not result[0]:
-            return "", 0.0
+            return []
 
-        texts = []
-        confs = []
+        outputs = []
 
         for line in result[0]:
             text = clean_text(line[1][0])
             conf = float(line[1][1])
 
             if text:
-                texts.append(text)
-                confs.append(conf)
+                outputs.append((text, conf))
 
-        if not texts:
-            return "", 0.0
-
-        joined_text = clean_text("".join(texts))
-        avg_conf = sum(confs) / len(confs)
-
-        return joined_text, avg_conf
+        return outputs
 
     except Exception as e:
         print("OCR ERROR:", e)
-        return "", 0.0
+        return []
 
 
 def recognize_plate(crop):
+    if crop is None or crop.size == 0:
+        return "", 0.0
+
     variants = preprocess_variants_for_ocr(crop)
 
     best_text = ""
@@ -233,23 +236,41 @@ def recognize_plate(crop):
     best_score = -999
 
     for variant in variants:
-        raw_text, conf = run_ocr(variant)
+        ocr_results = run_ocr(variant)
 
-        if not raw_text:
+        if not ocr_results:
             continue
 
-        fixed_text = fix_plate_by_position(raw_text)
-        extracted_text = extract_indonesian_plate(fixed_text)
+        # Case 1: Gabungkan semua hasil OCR
+        joined_text = clean_text("".join([text for text, conf in ocr_results]))
+        avg_conf = sum([conf for text, conf in ocr_results]) / len(ocr_results)
 
-        current_score = score_plate(extracted_text, conf)
+        fixed_joined = fix_plate_by_position(joined_text)
+        extracted_joined = extract_indonesian_plate(fixed_joined)
 
-        if current_score > best_score:
-            best_score = current_score
-            best_text = extracted_text
-            best_conf = conf
+        score_joined = score_plate(extracted_joined, avg_conf)
+
+        if score_joined > best_score:
+            best_score = score_joined
+            best_text = extracted_joined
+            best_conf = avg_conf
+
+        # Case 2: Cek per potongan OCR
+        for text, conf in ocr_results:
+            fixed_text = fix_plate_by_position(text)
+            extracted_text = extract_indonesian_plate(fixed_text)
+
+            score_single = score_plate(extracted_text, conf)
+
+            if score_single > best_score:
+                best_score = score_single
+                best_text = extracted_text
+                best_conf = conf
+
+    if not best_text:
+        return "", 0.0
 
     return best_text, best_conf
-
 
 def letterbox(image, new_shape=640):
     h, w = image.shape[:2]
@@ -362,7 +383,7 @@ def postprocess(outputs, original_image, scale, pad_x, pad_y):
 
 
 def get_vehicle_type(detections):
-    vehicle_priority = ["cars", "motorcyle", "truck"]
+    vehicle_priority = ["cars", "motorcycle", "truck"]
 
     for vehicle in vehicle_priority:
         for det in detections:
