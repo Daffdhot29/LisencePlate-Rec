@@ -1,527 +1,897 @@
 import os
 import re
-import cv2
 import time
+import threading
+from typing import Any
+
+import cv2
 import numpy as np
 import onnxruntime as ort
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
 from paddleocr import PaddleOCR
 
 
-app = FastAPI(title="ALPR API")
+app = FastAPI(
+    title="ALPR API - YOLOv9 Tiny + PaddleOCR"
+)
 
-MODEL_PATH = "models/vehicle_plate_yolov9tiny_best.onnx"
 
-IMG_SIZE = 960
-CONF_THRESH = 0.35
+MODEL_PATH = "models/yolov9tiny_optimized.onnx"
+
+IMG_SIZE = 640
+
+PLATE_CONF_THRESH = 0.20
+VEHICLE_CONF_THRESH = 0.25
 IOU_THRESH = 0.45
+
+OCR_MIN_CONFIDENCE = 0.20
+
+LICENSE_PLATE_CLASS_ID = 0
 
 CLASS_NAMES = [
     "License_Plate",
     "cars",
-    "motorcyle",
-    "truck"
+    "motorcycle",
 ]
 
-LICENSE_PLATE_CLASS_ID = 0
-
-plate_pattern = re.compile(r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$")
-plate_search_pattern = re.compile(r"[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}")
-
-
-ocr = PaddleOCR(
-    use_angle_cls=False,
-    lang="en",
-    show_log=False
+PLATE_PATTERN = re.compile(
+    r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$"
 )
 
 
-def get_onnx_providers():
+def clean_text(text: str) -> str:
+    return re.sub(
+        r"[^A-Z0-9]",
+        "",
+        str(text).upper(),
+    )
+
+
+def is_valid_plate(text: str) -> bool:
+    return (
+        PLATE_PATTERN.fullmatch(
+            clean_text(text)
+        )
+        is not None
+    )
+
+
+def format_plate(text: str) -> str:
+    cleaned = clean_text(text)
+
+    match = re.fullmatch(
+        r"([A-Z]{1,2})([0-9]{1,4})([A-Z]{1,3})",
+        cleaned,
+    )
+
+    if match is None:
+        return cleaned
+
+    return (
+        f"{match.group(1)} "
+        f"{match.group(2)} "
+        f"{match.group(3)}"
+    )
+
+
+def get_onnx_providers() -> list[str]:
     available = ort.get_available_providers()
 
     if "CUDAExecutionProvider" in available:
-        return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        return [
+            "CUDAExecutionProvider",
+            "CPUExecutionProvider",
+        ]
 
     return ["CPUExecutionProvider"]
 
 
-session = ort.InferenceSession(
-    MODEL_PATH,
-    providers=get_onnx_providers()
-)
-
-input_name = session.get_inputs()[0].name
-
-
-def clean_text(text):
-    text = text.upper()
-    text = re.sub(r"[^A-Z0-9]", "", text)
-    return text
-
-
-def format_plate(text):
-    text = clean_text(text)
-
-    match = re.match(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{1,3})$", text)
-
-    if match:
-        return f"{match.group(1)} {match.group(2)} {match.group(3)}"
-
-    return text
-
-
-def generate_plate_candidates(text):
-    text = clean_text(text)
-
-    if len(text) > 10:
-        return [text]
-
-    substitutions = {
-        "0": ["0", "O"],
-        "O": ["O", "0"],
-        "1": ["1", "I", "L"],
-        "I": ["I", "1"],
-        "L": ["L", "1"],
-        "8": ["8", "B"],
-        "B": ["B", "8"],
-        "5": ["5", "S"],
-        "S": ["S", "5"],
-        "6": ["6", "G"],
-        "G": ["G", "6"],
-        "2": ["2", "Z"],
-        "Z": ["Z", "2"],
-    }
-
-    candidates = set()
-
-    def backtrack(index, current):
-        if index == len(text):
-            candidates.add("".join(current))
-            return
-
-        char = text[index]
-        options = substitutions.get(char, [char])
-
-        for opt in options:
-            current.append(opt)
-            backtrack(index + 1, current)
-            current.pop()
-
-    backtrack(0, [])
-
-    return list(candidates)
-
-
-def fix_plate_by_position(text):
-    text = clean_text(text)
-
-    if len(text) < 4:
-        return text
-
-    to_digit = {
-        "O": "0",
-        "Q": "0",
-        "D": "0",
-        "I": "1",
-        "L": "1",
-        "Z": "2",
-        "S": "5",
-        "G": "6",
-        "B": "8"
-    }
-
-    to_letter = {
-        "0": "O",
-        "1": "I",
-        "2": "Z",
-        "5": "S",
-        "6": "G",
-        "8": "B"
-    }
-
-    chars = list(text)
-
-    for i in range(len(chars)):
-        if 1 <= i <= 5:
-            chars[i] = to_digit.get(chars[i], chars[i])
-
-    for i in range(len(chars)):
-        if i >= 5:
-            chars[i] = to_letter.get(chars[i], chars[i])
-
-    return "".join(chars)
-
-
-def extract_indonesian_plate(text):
-    text = clean_text(text)
-
-    candidates = plate_search_pattern.findall(text)
-
-    if not candidates:
-        return text
-
-    candidates = sorted(
-        candidates,
-        key=lambda x: (
-            plate_pattern.fullmatch(x) is not None,
-            6 <= len(x) <= 9,
-            len(x)
-        ),
-        reverse=True
+if not os.path.exists(MODEL_PATH):
+    raise FileNotFoundError(
+        f"Model ONNX tidak ditemukan: {MODEL_PATH}"
     )
 
-    return candidates[0]
+
+detector_session = ort.InferenceSession(
+    MODEL_PATH,
+    providers=get_onnx_providers(),
+)
+
+detector_input_name = (
+    detector_session.get_inputs()[0].name
+)
+
+detector_input_shape = (
+    detector_session.get_inputs()[0].shape
+)
+
+detector_output_shape = (
+    detector_session.get_outputs()[0].shape
+)
 
 
-def ocr_based_score(text, ocr_confidence):
-    text = clean_text(text)
+paddle_ocr = PaddleOCR(
+    use_angle_cls=False,
+    lang="en",
+    show_log=False,
+)
 
-    score = ocr_confidence * 100
-
-    if plate_pattern.fullmatch(text):
-        score += 20
-
-    if re.match(r"^([A-Z]{1,2})([0-9]{1,4})([A-Z]{1,3})$", text):
-        score += 15
-
-    if 6 <= len(text) <= 9:
-        score += 5
-
-    if len(text) < 5 or len(text) > 10:
-        score -= 30
-
-    return score
+paddle_lock = threading.Lock()
 
 
-def preprocess_variants_for_ocr(crop):
-    variants = []
+def empty_ocr_result(
+    error: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "raw_text": "",
+        "text": "",
+        "plate": "",
+        "confidence": 0.0,
+        "valid_format": False,
+        "variant": "",
+        "processing_time_seconds": 0.0,
+        "error": error,
+    }
 
+
+def make_ocr_variants(
+    crop: np.ndarray,
+) -> list[tuple[str, np.ndarray]]:
     if crop is None or crop.size == 0:
-        return variants
+        return []
 
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    height = crop.shape[0]
 
-    h, w = gray.shape[:2]
+    target_height = 128
 
-    if w < 100:
-        scale = 6
-    elif w < 160:
-        scale = 5
-    elif w < 240:
-        scale = 4
-    else:
-        scale = 3
+    scale = max(
+        2.0,
+        min(
+            5.0,
+            target_height / max(height, 1),
+        ),
+    )
 
-    resized = cv2.resize(
-        gray,
+    resized_color = cv2.resize(
+        crop,
         None,
         fx=scale,
         fy=scale,
-        interpolation=cv2.INTER_CUBIC
+        interpolation=cv2.INTER_CUBIC,
+    )
+
+    gray = cv2.cvtColor(
+        resized_color,
+        cv2.COLOR_BGR2GRAY,
     )
 
     clahe = cv2.createCLAHE(
-        clipLimit=2.0,
-        tileGridSize=(8, 8)
+        clipLimit=1.8,
+        tileGridSize=(8, 8),
     )
 
-    clahe_img = clahe.apply(resized)
+    clahe_image = clahe.apply(gray)
 
-    gaussian = cv2.GaussianBlur(clahe_img, (3, 3), 0)
-    median = cv2.medianBlur(clahe_img, 3)
+    sharpen_kernel = np.array(
+        [
+            [0, -1, 0],
+            [-1, 5, -1],
+            [0, -1, 0],
+        ],
+        dtype=np.float32,
+    )
 
-    sharpen_kernel = np.array([
-        [-1, -1, -1],
-        [-1,  5, -1],
-        [-1, -1, -1]
-    ])
+    sharpen_image = cv2.filter2D(
+        clahe_image,
+        -1,
+        sharpen_kernel,
+    )
 
-    sharp = cv2.filter2D(clahe_img, -1, sharpen_kernel)
-
-    _, otsu = cv2.threshold(
-        clahe_img,
+    _, otsu_image = cv2.threshold(
+        clahe_image,
         0,
         255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
 
-    adaptive = cv2.adaptiveThreshold(
-        clahe_img,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        15,
-        3
-    )
+    return [
+        (
+            "original",
+            resized_color,
+        ),
+        (
+            "gray",
+            cv2.cvtColor(
+                gray,
+                cv2.COLOR_GRAY2BGR,
+            ),
+        ),
+        (
+            "clahe",
+            cv2.cvtColor(
+                clahe_image,
+                cv2.COLOR_GRAY2BGR,
+            ),
+        ),
+        (
+            "sharpen",
+            cv2.cvtColor(
+                sharpen_image,
+                cv2.COLOR_GRAY2BGR,
+            ),
+        ),
+        (
+            "otsu",
+            cv2.cvtColor(
+                otsu_image,
+                cv2.COLOR_GRAY2BGR,
+            ),
+        ),
+    ]
 
-    inverted_otsu = cv2.bitwise_not(otsu)
-    inverted_adaptive = cv2.bitwise_not(adaptive)
 
-    variants.append(cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(clahe_img, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(gaussian, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(median, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(sharp, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(adaptive, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(inverted_otsu, cv2.COLOR_GRAY2BGR))
-    variants.append(cv2.cvtColor(inverted_adaptive, cv2.COLOR_GRAY2BGR))
-
-    return variants
-
-
-def run_ocr(image):
+def run_paddle_ocr(
+    image: np.ndarray,
+) -> list[tuple[str, float]]:
     try:
-        result = ocr.ocr(image, cls=False)
+        with paddle_lock:
+            result = paddle_ocr.ocr(
+                image,
+                cls=False,
+            )
 
         if not result or not result[0]:
             return []
 
-        outputs = []
+        outputs: list[tuple[str, float]] = []
 
         for line in result[0]:
-            text = clean_text(line[1][0])
-            conf = float(line[1][1])
+            if not line or len(line) < 2:
+                continue
 
-            if text:
-                outputs.append((text, conf))
+            raw_text = str(line[1][0])
+            confidence = float(line[1][1])
+
+            cleaned = clean_text(raw_text)
+
+            if not cleaned:
+                continue
+
+            if confidence < OCR_MIN_CONFIDENCE:
+                continue
+
+            outputs.append(
+                (
+                    cleaned,
+                    confidence,
+                )
+            )
 
         return outputs
 
-    except Exception as e:
-        print("OCR ERROR:", e)
+    except Exception as error:
+        print(
+            "PADDLE OCR ERROR:",
+            error,
+        )
+
         return []
 
 
-def recognize_plate(crop):
+def score_ocr_result(
+    text: str,
+    confidence: float,
+) -> float:
+    cleaned = clean_text(text)
+
+    score = float(confidence)
+
+    if is_valid_plate(cleaned):
+        score += 1.0
+
+    if 6 <= len(cleaned) <= 9:
+        score += 0.10
+
+    if len(cleaned) < 5:
+        score -= 0.50
+
+    if len(cleaned) > 10:
+        score -= 0.50
+
+    return score
+
+
+def recognize_plate(
+    crop: np.ndarray,
+) -> dict[str, Any]:
+    start_time = time.time()
+
     if crop is None or crop.size == 0:
-        return "", 0.0, 0.0, []
+        result = empty_ocr_result(
+            error="Crop plat kosong"
+        )
 
-    variants = preprocess_variants_for_ocr(crop)
+        result["processing_time_seconds"] = round(
+            time.time() - start_time,
+            4,
+        )
 
-    all_candidates = []
+        return result
 
-    for variant in variants:
-        ocr_results = run_ocr(variant)
+    best_text = ""
+    best_confidence = 0.0
+    best_score = float("-inf")
+    best_variant = ""
+
+    variants = make_ocr_variants(crop)
+
+    for variant_name, variant in variants:
+        ocr_results = run_paddle_ocr(
+            variant
+        )
 
         if not ocr_results:
             continue
 
-        joined_text = clean_text("".join([text for text, conf in ocr_results]))
-        avg_conf = sum([conf for text, conf in ocr_results]) / len(ocr_results)
+        results_to_check = list(
+            ocr_results
+        )
 
-        raw_texts = [(joined_text, avg_conf)] + ocr_results
+        if len(ocr_results) > 1:
+            joined_text = clean_text(
+                "".join(
+                    text
+                    for text, _
+                    in ocr_results
+                )
+            )
 
-        for raw_text, conf in raw_texts:
-            raw_text = clean_text(raw_text)
+            average_confidence = (
+                sum(
+                    confidence
+                    for _, confidence
+                    in ocr_results
+                )
+                / len(ocr_results)
+            )
 
-            if not raw_text:
+            results_to_check.append(
+                (
+                    joined_text,
+                    average_confidence,
+                )
+            )
+
+        for text, confidence in results_to_check:
+            cleaned = clean_text(text)
+
+            if not cleaned:
                 continue
 
-            generated_candidates = generate_plate_candidates(raw_text)
+            current_score = score_ocr_result(
+                cleaned,
+                confidence,
+            )
 
-            for candidate in generated_candidates:
-                fixed = fix_plate_by_position(candidate)
-                extracted = extract_indonesian_plate(fixed)
-                final_candidate = clean_text(extracted)
+            if current_score > best_score:
+                best_text = cleaned
+                best_confidence = confidence
+                best_score = current_score
+                best_variant = variant_name
 
-                final_score = ocr_based_score(final_candidate, conf)
+    processing_time = time.time() - start_time
 
-                all_candidates.append({
-                    "value": final_candidate,
-                    "formatted": format_plate(final_candidate),
-                    "score": round(final_score, 3),
-                    "ocr_confidence": round(conf, 3)
-                })
+    if not best_text:
+        result = empty_ocr_result()
 
-    if not all_candidates:
-        return "", 0.0, 0.0, []
+        result["processing_time_seconds"] = round(
+            processing_time,
+            4,
+        )
 
-    all_candidates = sorted(
-        all_candidates,
-        key=lambda x: (
-            x["ocr_confidence"],
-            x["score"]
+        return result
+
+    return {
+        "raw_text": best_text,
+        "text": best_text,
+        "plate": format_plate(best_text),
+        "confidence": round(
+            float(best_confidence),
+            4,
         ),
-        reverse=True
+        "valid_format": is_valid_plate(
+            best_text
+        ),
+        "variant": best_variant,
+        "processing_time_seconds": round(
+            processing_time,
+            4,
+        ),
+        "error": None,
+    }
+
+
+def letterbox(image: np.ndarray,new_shape: int = IMG_SIZE) -> tuple[np.ndarray, float, int, int]:
+    image_height, image_width = (
+        image.shape[:2]
     )
 
-    unique_candidates = []
-    seen = set()
+    scale = min(
+        new_shape / image_height,
+        new_shape / image_width,
+    )
 
-    for item in all_candidates:
-        if item["value"] not in seen:
-            item["rank"] = len(unique_candidates) + 1
-            unique_candidates.append(item)
-            seen.add(item["value"])
+    resized_width = int(
+        round(image_width * scale)
+    )
 
-        if len(unique_candidates) >= 10:
-            break
+    resized_height = int(
+        round(image_height * scale)
+    )
 
-    best = unique_candidates[0]
+    resized = cv2.resize(
+        image,
+        (
+            resized_width,
+            resized_height,
+        ),
+        interpolation=cv2.INTER_LINEAR,
+    )
+
+    canvas = np.full(
+        (
+            new_shape,
+            new_shape,
+            3,
+        ),
+        114,
+        dtype=np.uint8,
+    )
+
+    pad_x = (
+        new_shape - resized_width
+    ) // 2
+
+    pad_y = (
+        new_shape - resized_height
+    ) // 2
+
+    canvas[
+        pad_y:pad_y + resized_height,
+        pad_x:pad_x + resized_width,
+    ] = resized
 
     return (
-        best["value"],
-        best["ocr_confidence"],
-        best["score"],
-        unique_candidates
+        canvas,
+        scale,
+        pad_x,
+        pad_y,
     )
 
 
-def letterbox(image, new_shape=960):
-    h, w = image.shape[:2]
+def preprocess_detector(
+    image: np.ndarray,
+) -> tuple[np.ndarray, float, int, int]:
+    (
+        detector_image,
+        scale,
+        pad_x,
+        pad_y,
+    ) = letterbox(
+        image,
+        IMG_SIZE,
+    )
 
-    scale = min(new_shape / h, new_shape / w)
+    detector_image = cv2.cvtColor(
+        detector_image,
+        cv2.COLOR_BGR2RGB,
+    )
 
-    nh = int(h * scale)
-    nw = int(w * scale)
+    detector_image = (
+        detector_image.astype(np.float32)
+        / 255.0
+    )
 
-    resized = cv2.resize(image, (nw, nh))
+    detector_image = np.transpose(
+        detector_image,
+        (2, 0, 1),
+    )
 
-    canvas = np.full((new_shape, new_shape, 3), 114, dtype=np.uint8)
+    detector_image = np.expand_dims(
+        detector_image,
+        axis=0,
+    )
 
-    top = (new_shape - nh) // 2
-    left = (new_shape - nw) // 2
+    detector_image = np.ascontiguousarray(
+        detector_image
+    )
 
-    canvas[top:top + nh, left:left + nw] = resized
-
-    return canvas, scale, left, top
-
-
-def preprocess_detector(image):
-    img, scale, pad_x, pad_y = letterbox(image, IMG_SIZE)
-
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    img = img.astype(np.float32) / 255.0
-    img = np.transpose(img, (2, 0, 1))
-    img = np.expand_dims(img, axis=0)
-
-    return img, scale, pad_x, pad_y
-
-
-def xywh_to_xyxy(box):
-    x, y, w, h = box
-
-    return [
-        x - w / 2,
-        y - h / 2,
-        x + w / 2,
-        y + h / 2
-    ]
+    return (
+        detector_image,
+        scale,
+        pad_x,
+        pad_y,
+    )
 
 
-def postprocess(outputs, original_image, scale, pad_x, pad_y):
-    predictions = outputs[0]
+def xywh_to_xyxy(
+    box: np.ndarray,
+) -> tuple[float, float, float, float]:
+    center_x = float(box[0])
+    center_y = float(box[1])
+    width = float(box[2])
+    height = float(box[3])
+
+    return (
+        center_x - width / 2,
+        center_y - height / 2,
+        center_x + width / 2,
+        center_y + height / 2,
+    )
+
+
+def get_class_threshold(
+    class_id: int,
+) -> float:
+    if class_id == LICENSE_PLATE_CLASS_ID:
+        return PLATE_CONF_THRESH
+
+    return VEHICLE_CONF_THRESH
+
+
+def normalize_predictions(
+    output: np.ndarray,
+) -> np.ndarray:
+    predictions = output
 
     if predictions.ndim == 3:
         predictions = predictions[0]
 
-    if predictions.shape[0] < predictions.shape[1]:
+    expected_columns = (
+        4 + len(CLASS_NAMES)
+    )
+
+    if predictions.shape[0] == expected_columns:
         predictions = predictions.T
 
-    boxes = []
-    scores = []
-    class_ids = []
+    elif predictions.shape[1] == expected_columns:
+        pass
 
-    h_img, w_img = original_image.shape[:2]
+    elif predictions.shape[0] < predictions.shape[1]:
+        predictions = predictions.T
 
-    for pred in predictions:
-        box = pred[:4]
-        class_scores = pred[4:]
+    return predictions
 
-        class_id = int(np.argmax(class_scores))
-        confidence = float(class_scores[class_id])
 
-        if confidence < CONF_THRESH:
+def postprocess(
+    outputs: list[np.ndarray],
+    original_image: np.ndarray,
+    scale: float,
+    pad_x: int,
+    pad_y: int,
+) -> list[dict[str, Any]]:
+    predictions = normalize_predictions(
+        outputs[0]
+    )
+
+    image_height, image_width = (
+        original_image.shape[:2]
+    )
+
+    boxes: list[list[int]] = []
+    scores: list[float] = []
+    class_ids: list[int] = []
+
+    expected_columns = (
+        4 + len(CLASS_NAMES)
+    )
+
+    for prediction in predictions:
+        if prediction.shape[0] < expected_columns:
             continue
 
-        x1, y1, x2, y2 = xywh_to_xyxy(box)
+        class_scores = prediction[
+            4:4 + len(CLASS_NAMES)
+        ]
+
+        class_id = int(
+            np.argmax(class_scores)
+        )
+
+        confidence = float(
+            class_scores[class_id]
+        )
+
+        threshold = get_class_threshold(
+            class_id
+        )
+
+        if confidence < threshold:
+            continue
+
+        x1, y1, x2, y2 = xywh_to_xyxy(
+            prediction[:4]
+        )
 
         x1 = (x1 - pad_x) / scale
         y1 = (y1 - pad_y) / scale
         x2 = (x2 - pad_x) / scale
         y2 = (y2 - pad_y) / scale
 
-        x1 = max(0, min(w_img, int(x1)))
-        y1 = max(0, min(h_img, int(y1)))
-        x2 = max(0, min(w_img, int(x2)))
-        y2 = max(0, min(h_img, int(y2)))
+        x1 = int(
+            np.clip(
+                round(x1),
+                0,
+                image_width - 1,
+            )
+        )
+
+        y1 = int(
+            np.clip(
+                round(y1),
+                0,
+                image_height - 1,
+            )
+        )
+
+        x2 = int(
+            np.clip(
+                round(x2),
+                0,
+                image_width,
+            )
+        )
+
+        y2 = int(
+            np.clip(
+                round(y2),
+                0,
+                image_height,
+            )
+        )
 
         if x2 <= x1 or y2 <= y1:
             continue
 
-        boxes.append([x1, y1, x2 - x1, y2 - y1])
+        boxes.append(
+            [
+                x1,
+                y1,
+                x2 - x1,
+                y2 - y1,
+            ]
+        )
+
         scores.append(confidence)
         class_ids.append(class_id)
 
-    indices = cv2.dnn.NMSBoxes(
-        boxes,
-        scores,
-        CONF_THRESH,
-        IOU_THRESH
-    )
+    if not boxes:
+        return []
 
-    detections = []
+    detections: list[
+        dict[str, Any]
+    ] = []
 
-    if len(indices) > 0:
-        indices = np.array(indices).flatten()
+    for class_id in sorted(set(class_ids)):
+        class_indices = [
+            index
+            for index, current_class_id
+            in enumerate(class_ids)
+            if current_class_id == class_id
+        ]
 
-        for i in indices:
-            x, y, w, h = boxes[i]
+        class_boxes = [
+            boxes[index]
+            for index in class_indices
+        ]
 
-            detections.append({
-                "class_id": class_ids[i],
-                "class_name": CLASS_NAMES[class_ids[i]],
-                "det_confidence": float(scores[i]),
-                "box": [x, y, x + w, y + h]
-            })
+        class_scores = [
+            scores[index]
+            for index in class_indices
+        ]
+
+        nms_indices = cv2.dnn.NMSBoxes(
+            class_boxes,
+            class_scores,
+            get_class_threshold(class_id),
+            IOU_THRESH,
+        )
+
+        if len(nms_indices) == 0:
+            continue
+
+        for local_index in (
+            np.array(nms_indices).reshape(-1)
+        ):
+            global_index = class_indices[
+                int(local_index)
+            ]
+
+            x, y, width, height = boxes[
+                global_index
+            ]
+
+            detections.append(
+                {
+                    "class_id": class_ids[
+                        global_index
+                    ],
+                    "class_name": CLASS_NAMES[
+                        class_ids[
+                            global_index
+                        ]
+                    ],
+                    "det_confidence": float(
+                        scores[
+                            global_index
+                        ]
+                    ),
+                    "box": [
+                        x,
+                        y,
+                        x + width,
+                        y + height,
+                    ],
+                }
+            )
 
     return detections
 
 
-def get_vehicle_type(detections):
-    vehicle_priority = ["cars", "motorcyle", "truck"]
+def get_vehicle_type(
+    detections: list[dict[str, Any]],
+) -> str:
+    vehicle_detections = [
+        detection
+        for detection in detections
+        if detection["class_name"]
+        in {
+            "cars",
+            "motorcycle",
+        }
+    ]
 
-    for vehicle in vehicle_priority:
-        for det in detections:
-            if det["class_name"] == vehicle:
-                return vehicle
+    if not vehicle_detections:
+        return "Unknown"
 
-    return "Unknown"
+    best_vehicle = max(
+        vehicle_detections,
+        key=lambda detection:
+            detection["det_confidence"],
+    )
 
-
-def crop_with_large_padding(image, box):
-    h_img, w_img = image.shape[:2]
-
-    x1, y1, x2, y2 = box
-
-    box_w = x2 - x1
-    box_h = y2 - y1
-
-    pad_x = int(box_w * 0.25)
-    pad_y = int(box_h * 0.45)
-
-    pad_x = max(20, min(pad_x, 70))
-    pad_y = max(15, min(pad_y, 50))
-
-    crop_x1 = max(0, x1 - pad_x)
-    crop_y1 = max(0, y1 - pad_y)
-    crop_x2 = min(w_img, x2 + pad_x)
-    crop_y2 = min(h_img, y2 + pad_y)
-
-    return image[crop_y1:crop_y2, crop_x1:crop_x2]
+    return str(
+        best_vehicle["class_name"]
+    )
 
 
-def process_image(image):
-    start_time = time.time()
+def crop_plate_for_ocr(
+    image: np.ndarray,
+    box: list[int],
+) -> np.ndarray:
+    image_height, image_width = (
+        image.shape[:2]
+    )
 
-    input_tensor, scale, pad_x, pad_y = preprocess_detector(image)
+    x1, y1, x2, y2 = [
+        int(value)
+        for value in box
+    ]
 
-    outputs = session.run(
+    box_width = max(
+        1,
+        x2 - x1,
+    )
+
+    box_height = max(
+        1,
+        y2 - y1,
+    )
+
+    padding_x = int(
+        box_width * 0.12
+    )
+
+    padding_top = int(
+        box_height * 0.10
+    )
+
+    padding_bottom = int(
+        box_height * 0.05
+    )
+
+    padding_x = max(
+        3,
+        min(
+            padding_x,
+            24,
+        ),
+    )
+
+    padding_top = max(
+        2,
+        min(
+            padding_top,
+            14,
+        ),
+    )
+
+    padding_bottom = max(
+        1,
+        min(
+            padding_bottom,
+            8,
+        ),
+    )
+
+    crop_x1 = max(
+        0,
+        x1 - padding_x,
+    )
+
+    crop_y1 = max(
+        0,
+        y1 - padding_top,
+    )
+
+    crop_x2 = min(
+        image_width,
+        x2 + padding_x,
+    )
+
+    crop_y2 = min(
+        image_height,
+        y2 + padding_bottom,
+    )
+
+    return image[
+        crop_y1:crop_y2,
+        crop_x1:crop_x2,
+    ]
+
+
+def select_best_plate_detection(
+    detections: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    plate_detections = [
+        detection
+        for detection in detections
+        if detection["class_id"]
+        == LICENSE_PLATE_CLASS_ID
+    ]
+
+    if not plate_detections:
+        return None
+
+    return max(
+        plate_detections,
+        key=lambda detection:
+            detection["det_confidence"],
+    )
+
+
+def process_image(
+    image: np.ndarray,
+) -> dict[str, Any]:
+    total_start_time = time.time()
+
+    detector_start_time = time.time()
+
+    (
+        detector_tensor,
+        scale,
+        pad_x,
+        pad_y,
+    ) = preprocess_detector(image)
+
+    outputs = detector_session.run(
         None,
-        {input_name: input_tensor}
+        {
+            detector_input_name:
+                detector_tensor
+        },
     )
 
     detections = postprocess(
@@ -529,135 +899,193 @@ def process_image(image):
         image,
         scale,
         pad_x,
-        pad_y
+        pad_y,
     )
 
-    vehicle_type = get_vehicle_type(detections)
+    detector_processing_time = (
+        time.time()
+        - detector_start_time
+    )
 
-    best_plate = "Plate Unreadable"
-    best_raw_plate = ""
-    best_ocr_conf = 0.0
-    best_det_conf = 0.0
-    best_final_score = 0.0
-    best_candidates = []
-    best_box = None
+    vehicle_type = get_vehicle_type(
+        detections
+    )
 
-    for det in detections:
-        if det["class_id"] != LICENSE_PLATE_CLASS_ID:
-            continue
-
-        plate_crop = crop_with_large_padding(
-            image,
-            det["box"]
+    plate_detection = (
+        select_best_plate_detection(
+            detections
         )
+    )
 
-        plate_text, ocr_conf, final_score, plate_candidates = recognize_plate(plate_crop)
+    if plate_detection is None:
+        return {
+            "status": "plate_not_detected",
+            "vehicle_type": vehicle_type,
+            "plate": "Plate Unreadable",
+            "raw_plate": "",
+            "plate_box": None,
+            "det_confidence": 0.0,
+            "ocr_confidence": 0.0,
+            "ocr_valid_format": False,
+            "ocr_variant": "",
+            "ocr_processing_time_seconds": 0.0,
+            "detector_processing_time_seconds": round(
+                detector_processing_time,
+                4,
+            ),
+            "processing_time_seconds": round(
+                time.time()
+                - total_start_time,
+                4,
+            ),
+        }
 
-        if plate_text:
-            if ocr_conf > best_ocr_conf:
-                best_raw_plate = plate_text
-                best_plate = format_plate(plate_text)
-                best_ocr_conf = ocr_conf
-                best_det_conf = det["det_confidence"]
-                best_final_score = final_score
-                best_candidates = plate_candidates
-                best_box = det["box"]
+    plate_crop = crop_plate_for_ocr(
+        image,
+        plate_detection["box"],
+    )
 
-            elif ocr_conf == best_ocr_conf and final_score > best_final_score:
-                best_raw_plate = plate_text
-                best_plate = format_plate(plate_text)
-                best_ocr_conf = ocr_conf
-                best_det_conf = det["det_confidence"]
-                best_final_score = final_score
-                best_candidates = plate_candidates
-                best_box = det["box"]
+    ocr_result = recognize_plate(
+        plate_crop
+    )
 
-    process_time = time.time() - start_time
+    x1, y1, x2, y2 = (
+        plate_detection["box"]
+    )
+
+    plate_text = (
+        ocr_result["plate"]
+        if ocr_result["text"]
+        else "Plate Unreadable"
+    )
 
     return {
-        "plate": best_plate,
-        "raw_plate": best_raw_plate,
+        "status": "success",
         "vehicle_type": vehicle_type,
-        "det_confidence": round(best_det_conf, 3),
-        "ocr_confidence": round(best_ocr_conf, 3),
-        "final_score": round(best_final_score, 3),
+        "plate": plate_text,
+        "raw_plate": ocr_result["text"],
         "plate_box": {
-            "xmin": best_box[0],
-            "ymin": best_box[1],
-            "xmax": best_box[2],
-            "ymax": best_box[3]
-        } if best_box else None,
-        "plate_candidates": best_candidates,
-        "processing_time_seconds": round(process_time, 3)
+            "xmin": int(x1),
+            "ymin": int(y1),
+            "xmax": int(x2),
+            "ymax": int(y2),
+        },
+        "det_confidence": round(
+            float(
+                plate_detection[
+                    "det_confidence"
+                ]
+            ),
+            4,
+        ),
+        "ocr_confidence": (
+            ocr_result["confidence"]
+        ),
+        "ocr_valid_format": (
+            ocr_result["valid_format"]
+        ),
+        "ocr_variant": (
+            ocr_result["variant"]
+        ),
+        "ocr_processing_time_seconds": (
+            ocr_result[
+                "processing_time_seconds"
+            ]
+        ),
+        "detector_processing_time_seconds": round(
+            detector_processing_time,
+            4,
+        ),
+        "processing_time_seconds": round(
+            time.time()
+            - total_start_time,
+            4,
+        ),
+        "error": ocr_result["error"],
+    }
+
+
+def invalid_image_response(
+    error: str,
+) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "vehicle_type": "Unknown",
+        "plate": "Plate Unreadable",
+        "raw_plate": "",
+        "plate_box": None,
+        "det_confidence": 0.0,
+        "ocr_confidence": 0.0,
+        "ocr_valid_format": False,
+        "ocr_variant": "",
+        "ocr_processing_time_seconds": 0.0,
+        "detector_processing_time_seconds": 0.0,
+        "processing_time_seconds": 0.0,
+        "error": error,
     }
 
 
 @app.get("/")
-def root():
+def root() -> dict[str, Any]:
     return {
         "message": "ALPR API is running",
         "endpoint": "POST /recognize",
+        "detector": "YOLOv9-tiny ONNX",
         "model": MODEL_PATH,
-        "selection_priority": [
-            "ocr_confidence",
-            "final_score",
-            "regex_validity"
-        ],
-        "response_fields": [
-            "plate",
-            "raw_plate",
-            "vehicle_type",
-            "det_confidence",
-            "ocr_confidence",
-            "final_score",
-            "plate_box",
-            "plate_candidates",
-            "processing_time_seconds"
-        ]
+        "model_input": detector_input_shape,
+        "model_output": detector_output_shape,
+        "img_size": IMG_SIZE,
+        "classes": CLASS_NAMES,
+        "ocr": "PaddleOCR",
+        "candidate_generator": False,
+        "automatic_character_replacement": False,
     }
 
 
 @app.post("/recognize")
-async def recognize(file: UploadFile = File(...)):
+async def recognize(
+    file: UploadFile = File(...),
+):
     try:
         file_bytes = await file.read()
 
-        np_arr = np.frombuffer(file_bytes, np.uint8)
-        image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if not file_bytes:
+            return JSONResponse(
+                status_code=400,
+                content=invalid_image_response(
+                    "File kosong"
+                ),
+            )
+
+        image_array = np.frombuffer(
+            file_bytes,
+            dtype=np.uint8,
+        )
+
+        image = cv2.imdecode(
+            image_array,
+            cv2.IMREAD_COLOR,
+        )
 
         if image is None:
             return JSONResponse(
                 status_code=400,
-                content={
-                    "plate": "Plate Unreadable",
-                    "raw_plate": "",
-                    "vehicle_type": "Unknown",
-                    "det_confidence": 0.0,
-                    "ocr_confidence": 0.0,
-                    "final_score": 0.0,
-                    "plate_box": None,
-                    "plate_candidates": [],
-                    "processing_time_seconds": 0.0
-                }
+                content=invalid_image_response(
+                    "File bukan gambar valid"
+                ),
             )
 
-        result = process_image(image)
+        return process_image(image)
 
-        return result
+    except Exception as error:
+        print(
+            "API ERROR:",
+            error,
+        )
 
-    except Exception as e:
         return JSONResponse(
             status_code=500,
-            content={
-                "plate": "Plate Unreadable",
-                "raw_plate": "",
-                "vehicle_type": "Unknown",
-                "det_confidence": 0.0,
-                "ocr_confidence": 0.0,
-                "final_score": 0.0,
-                "plate_box": None,
-                "plate_candidates": [],
-                "processing_time_seconds": 0.0,
-                "error": str(e)
-            }
+            content=invalid_image_response(
+                str(error)
+            ),
         )
