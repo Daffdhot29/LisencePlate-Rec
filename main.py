@@ -18,7 +18,7 @@ app = FastAPI(
 )
 
 
-MODEL_PATH = "models/yolov9tiny_optimized.onnx"
+MODEL_PATH = "models/model_lpr3.onnx"
 
 IMG_SIZE = 640
 
@@ -1044,10 +1044,22 @@ def root() -> dict[str, Any]:
 
 @app.post("/recognize")
 async def recognize(
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    image: UploadFile | None = File(None),
 ):
     try:
-        file_bytes = await file.read()
+        uploaded_file = file or image
+
+        if uploaded_file is None:
+            return JSONResponse(
+                status_code=400,
+                content=invalid_image_response(
+                    'File gambar tidak ditemukan. '
+                    'Gunakan multipart/form-data dengan field "file" atau "image".'
+                ),
+            )
+
+        file_bytes = await uploaded_file.read()
 
         if not file_bytes:
             return JSONResponse(
@@ -1062,12 +1074,12 @@ async def recognize(
             dtype=np.uint8,
         )
 
-        image = cv2.imdecode(
+        decoded_image = cv2.imdecode(
             image_array,
             cv2.IMREAD_COLOR,
         )
 
-        if image is None:
+        if decoded_image is None:
             return JSONResponse(
                 status_code=400,
                 content=invalid_image_response(
@@ -1075,7 +1087,12 @@ async def recognize(
                 ),
             )
 
-        return process_image(image)
+        result = process_image(decoded_image)
+
+        return JSONResponse(
+            status_code=200,
+            content=result,
+        )
 
     except Exception as error:
         print(
