@@ -121,24 +121,10 @@ paddle_ocr = PaddleOCR(
 paddle_lock = threading.Lock()
 
 
-def empty_ocr_result(
-    error: str | None = None,
-) -> dict[str, Any]:
-    return {
-        "raw_text": "",
-        "text": "",
-        "plate": "",
-        "confidence": 0.0,
-        "valid_format": False,
-        "variant": "",
-        "processing_time_seconds": 0.0,
-        "error": error,
-    }
-
-
 def make_ocr_variants(
     crop: np.ndarray,
 ) -> list[tuple[str, np.ndarray]]:
+
     if crop is None or crop.size == 0:
         return []
 
@@ -235,6 +221,7 @@ def make_ocr_variants(
 def run_paddle_ocr(
     image: np.ndarray,
 ) -> list[tuple[str, float]]:
+
     try:
         with paddle_lock:
             result = paddle_ocr.ocr(
@@ -284,6 +271,7 @@ def score_ocr_result(
     text: str,
     confidence: float,
 ) -> float:
+
     cleaned = clean_text(text)
 
     score = float(confidence)
@@ -306,28 +294,22 @@ def score_ocr_result(
 def recognize_plate(
     crop: np.ndarray,
 ) -> dict[str, Any]:
-    start_time = time.time()
 
     if crop is None or crop.size == 0:
-        result = empty_ocr_result(
-            error="Crop plat kosong"
-        )
-
-        result["processing_time_seconds"] = round(
-            time.time() - start_time,
-            4,
-        )
-
-        return result
+        return {
+            "text": "",
+            "plate": "",
+            "confidence": 0.0,
+        }
 
     best_text = ""
     best_confidence = 0.0
     best_score = float("-inf")
-    best_variant = ""
 
     variants = make_ocr_variants(crop)
 
-    for variant_name, variant in variants:
+    for _, variant in variants:
+
         ocr_results = run_paddle_ocr(
             variant
         )
@@ -340,6 +322,7 @@ def recognize_plate(
         )
 
         if len(ocr_results) > 1:
+
             joined_text = clean_text(
                 "".join(
                     text
@@ -365,6 +348,7 @@ def recognize_plate(
             )
 
         for text, confidence in results_to_check:
+
             cleaned = clean_text(text)
 
             if not cleaned:
@@ -379,44 +363,30 @@ def recognize_plate(
                 best_text = cleaned
                 best_confidence = confidence
                 best_score = current_score
-                best_variant = variant_name
-
-    processing_time = time.time() - start_time
 
     if not best_text:
-        result = empty_ocr_result()
-
-        result["processing_time_seconds"] = round(
-            processing_time,
-            4,
-        )
-
-        return result
+        return {
+            "text": "",
+            "plate": "",
+            "confidence": 0.0,
+        }
 
     return {
-        "raw_text": best_text,
         "text": best_text,
         "plate": format_plate(best_text),
         "confidence": round(
             float(best_confidence),
             4,
         ),
-        "valid_format": is_valid_plate(
-            best_text
-        ),
-        "variant": best_variant,
-        "processing_time_seconds": round(
-            processing_time,
-            4,
-        ),
-        "error": None,
     }
 
 
-def letterbox(image: np.ndarray,new_shape: int = IMG_SIZE) -> tuple[np.ndarray, float, int, int]:
-    image_height, image_width = (
-        image.shape[:2]
-    )
+def letterbox(
+    image: np.ndarray,
+    new_shape: int = IMG_SIZE,
+) -> tuple[np.ndarray, float, int, int]:
+
+    image_height, image_width = image.shape[:2]
 
     scale = min(
         new_shape / image_height,
@@ -474,6 +444,7 @@ def letterbox(image: np.ndarray,new_shape: int = IMG_SIZE) -> tuple[np.ndarray, 
 def preprocess_detector(
     image: np.ndarray,
 ) -> tuple[np.ndarray, float, int, int]:
+
     (
         detector_image,
         scale,
@@ -519,6 +490,7 @@ def preprocess_detector(
 def xywh_to_xyxy(
     box: np.ndarray,
 ) -> tuple[float, float, float, float]:
+
     center_x = float(box[0])
     center_y = float(box[1])
     width = float(box[2])
@@ -535,6 +507,7 @@ def xywh_to_xyxy(
 def get_class_threshold(
     class_id: int,
 ) -> float:
+
     if class_id == LICENSE_PLATE_CLASS_ID:
         return PLATE_CONF_THRESH
 
@@ -544,6 +517,7 @@ def get_class_threshold(
 def normalize_predictions(
     output: np.ndarray,
 ) -> np.ndarray:
+
     predictions = output
 
     if predictions.ndim == 3:
@@ -572,6 +546,7 @@ def postprocess(
     pad_x: int,
     pad_y: int,
 ) -> list[dict[str, Any]]:
+
     predictions = normalize_predictions(
         outputs[0]
     )
@@ -589,6 +564,7 @@ def postprocess(
     )
 
     for prediction in predictions:
+
         if prediction.shape[0] < expected_columns:
             continue
 
@@ -670,11 +646,10 @@ def postprocess(
     if not boxes:
         return []
 
-    detections: list[
-        dict[str, Any]
-    ] = []
+    detections = []
 
     for class_id in sorted(set(class_ids)):
+
         class_indices = [
             index
             for index, current_class_id
@@ -705,13 +680,14 @@ def postprocess(
         for local_index in (
             np.array(nms_indices).reshape(-1)
         ):
+
             global_index = class_indices[
                 int(local_index)
             ]
 
-            x, y, width, height = boxes[
-                global_index
-            ]
+            x, y, width, height = (
+                boxes[global_index]
+            )
 
             detections.append(
                 {
@@ -743,6 +719,7 @@ def postprocess(
 def get_vehicle_type(
     detections: list[dict[str, Any]],
 ) -> str:
+
     vehicle_detections = [
         detection
         for detection in detections
@@ -771,6 +748,7 @@ def crop_plate_for_ocr(
     image: np.ndarray,
     box: list[int],
 ) -> np.ndarray:
+
     image_height, image_width = (
         image.shape[:2]
     )
@@ -855,6 +833,7 @@ def crop_plate_for_ocr(
 def select_best_plate_detection(
     detections: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
+
     plate_detections = [
         detection
         for detection in detections
@@ -875,9 +854,8 @@ def select_best_plate_detection(
 def process_image(
     image: np.ndarray,
 ) -> dict[str, Any]:
-    total_start_time = time.time()
 
-    detector_start_time = time.time()
+    total_start_time = time.time()
 
     (
         detector_tensor,
@@ -902,11 +880,6 @@ def process_image(
         pad_y,
     )
 
-    detector_processing_time = (
-        time.time()
-        - detector_start_time
-    )
-
     vehicle_type = get_vehicle_type(
         detections
     )
@@ -923,19 +896,8 @@ def process_image(
             "vehicle_type": vehicle_type,
             "plate": "Plate Unreadable",
             "raw_plate": "",
-            "plate_box": None,
-            "det_confidence": 0.0,
-            "ocr_confidence": 0.0,
-            "ocr_valid_format": False,
-            "ocr_variant": "",
-            "ocr_processing_time_seconds": 0.0,
-            "detector_processing_time_seconds": round(
-                detector_processing_time,
-                4,
-            ),
             "processing_time_seconds": round(
-                time.time()
-                - total_start_time,
+                time.time() - total_start_time,
                 4,
             ),
         }
@@ -949,10 +911,6 @@ def process_image(
         plate_crop
     )
 
-    x1, y1, x2, y2 = (
-        plate_detection["box"]
-    )
-
     plate_text = (
         ocr_result["plate"]
         if ocr_result["text"]
@@ -964,62 +922,22 @@ def process_image(
         "vehicle_type": vehicle_type,
         "plate": plate_text,
         "raw_plate": ocr_result["text"],
-        "plate_box": {
-            "xmin": int(x1),
-            "ymin": int(y1),
-            "xmax": int(x2),
-            "ymax": int(y2),
-        },
-        "det_confidence": round(
-            float(
-                plate_detection[
-                    "det_confidence"
-                ]
-            ),
-            4,
-        ),
-        "ocr_confidence": (
-            ocr_result["confidence"]
-        ),
-        "ocr_valid_format": (
-            ocr_result["valid_format"]
-        ),
-        "ocr_variant": (
-            ocr_result["variant"]
-        ),
-        "ocr_processing_time_seconds": (
-            ocr_result[
-                "processing_time_seconds"
-            ]
-        ),
-        "detector_processing_time_seconds": round(
-            detector_processing_time,
-            4,
-        ),
         "processing_time_seconds": round(
-            time.time()
-            - total_start_time,
+            time.time() - total_start_time,
             4,
         ),
-        "error": ocr_result["error"],
     }
 
 
 def invalid_image_response(
     error: str,
 ) -> dict[str, Any]:
+
     return {
         "status": "error",
         "vehicle_type": "Unknown",
         "plate": "Plate Unreadable",
         "raw_plate": "",
-        "plate_box": None,
-        "det_confidence": 0.0,
-        "ocr_confidence": 0.0,
-        "ocr_valid_format": False,
-        "ocr_variant": "",
-        "ocr_processing_time_seconds": 0.0,
-        "detector_processing_time_seconds": 0.0,
         "processing_time_seconds": 0.0,
         "error": error,
     }
@@ -1027,18 +945,14 @@ def invalid_image_response(
 
 @app.get("/")
 def root() -> dict[str, Any]:
+
     return {
         "message": "ALPR API is running",
         "endpoint": "POST /recognize",
         "detector": "YOLOv9-tiny ONNX",
         "model": MODEL_PATH,
-        "model_input": detector_input_shape,
-        "model_output": detector_output_shape,
         "img_size": IMG_SIZE,
-        "classes": CLASS_NAMES,
         "ocr": "PaddleOCR",
-        "candidate_generator": False,
-        "automatic_character_replacement": False,
     }
 
 
@@ -1047,6 +961,7 @@ async def recognize(
     file: UploadFile | None = File(None),
     image: UploadFile | None = File(None),
 ):
+
     try:
         uploaded_file = file or image
 
@@ -1055,7 +970,8 @@ async def recognize(
                 status_code=400,
                 content=invalid_image_response(
                     'File gambar tidak ditemukan. '
-                    'Gunakan multipart/form-data dengan field "file" atau "image".'
+                    'Gunakan multipart/form-data '
+                    'dengan field "file" atau "image".'
                 ),
             )
 
@@ -1087,7 +1003,9 @@ async def recognize(
                 ),
             )
 
-        result = process_image(decoded_image)
+        result = process_image(
+            decoded_image
+        )
 
         return JSONResponse(
             status_code=200,
@@ -1095,6 +1013,7 @@ async def recognize(
         )
 
     except Exception as error:
+
         print(
             "API ERROR:",
             error,
