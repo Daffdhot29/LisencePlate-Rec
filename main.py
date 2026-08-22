@@ -14,7 +14,7 @@ from paddleocr import PaddleOCR
 
 
 app = FastAPI(
-    title="ALPR API - YOLOv9 Tiny + PaddleOCR"
+    title="LPR API"
 )
 
 
