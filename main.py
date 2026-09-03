@@ -18,16 +18,14 @@ app = FastAPI(
 )
 
 
-MODEL_PATH = "models/model_lpr3.onnx"
+MODEL_PATH = "models/lpr_yolov9t.onnx"
 
 IMG_SIZE = 640
 
 PLATE_CONF_THRESH = 0.20
 VEHICLE_CONF_THRESH = 0.25
 IOU_THRESH = 0.45
-
 OCR_MIN_CONFIDENCE = 0.20
-
 LICENSE_PLATE_CLASS_ID = 0
 
 CLASS_NAMES = [
@@ -896,10 +894,7 @@ def process_image(
             "vehicle_type": vehicle_type,
             "plate": "Plate Unreadable",
             "raw_plate": "",
-            "processing_time_seconds": round(
-                time.time() - total_start_time,
-                4,
-            ),
+            "processing_time_seconds": round(time.time() - total_start_time,4)
         }
 
     plate_crop = crop_plate_for_ocr(

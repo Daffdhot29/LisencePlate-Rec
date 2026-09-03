@@ -485,9 +485,6 @@ def process_image(image):
     }
 
 
-# =========================
-# STREAMLIT UI
-# =========================
 st.set_page_config(
     page_title="ALPR Vehicle Recognition",
     page_icon="🚗",
