@@ -1,6 +1,5 @@
 import os
 import re
-import time
 import threading
 from typing import Any
 
@@ -13,30 +12,51 @@ from fastapi.responses import JSONResponse
 from paddleocr import PaddleOCR
 
 
-app = FastAPI(
-    title="LPR API"
-)
+app = FastAPI(title="LPR API")
 
 
-MODEL_PATH = "models/lpr_yolov9t.onnx"
+MODEL_PATH = "models/LPR_MAX.onnx"
 
 IMG_SIZE = 640
 
 PLATE_CONF_THRESH = 0.20
 VEHICLE_CONF_THRESH = 0.25
 IOU_THRESH = 0.45
-OCR_MIN_CONFIDENCE = 0.20
-LICENSE_PLATE_CLASS_ID = 0
+OCR_MIN_CONFIDENCE = 0.25
+
+LICENSE_PLATE_CLASS_ID = 2
 
 CLASS_NAMES = [
-    "License_Plate",
-    "cars",
-    "motorcycle",
+    "mobil",
+    "motor",
+    "platenumberIDN",
+    "truk",
 ]
 
 PLATE_PATTERN = re.compile(
     r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$"
 )
+
+LETTER_TO_DIGIT = {
+    "O": "0",
+    "Q": "0",
+    "D": "0",
+    "I": "1",
+    "L": "1",
+    "Z": "2",
+    "S": "5",
+    "G": "6",
+    "B": "8",
+}
+
+DIGIT_TO_LETTER = {
+    "0": "O",
+    "1": "I",
+    "2": "Z",
+    "5": "S",
+    "6": "G",
+    "8": "B",
+}
 
 
 def clean_text(text: str) -> str:
@@ -74,7 +94,76 @@ def format_plate(text: str) -> str:
     )
 
 
+def generate_plate_candidates(
+    text: str,
+) -> list[str]:
+
+    text = clean_text(text)
+
+    if not text:
+        return []
+
+    candidates = {text}
+
+    for prefix_len in (1, 2):
+
+        if len(text) <= prefix_len:
+            continue
+
+        prefix_raw = text[:prefix_len]
+
+        prefix = "".join(
+            DIGIT_TO_LETTER.get(char, char)
+            for char in prefix_raw
+        )
+
+        if not prefix.isalpha():
+            continue
+
+        for number_len in range(1, 5):
+
+            suffix_start = (
+                prefix_len + number_len
+            )
+
+            if suffix_start >= len(text):
+                continue
+
+            number_raw = text[
+                prefix_len:suffix_start
+            ]
+
+            suffix_raw = text[
+                suffix_start:
+            ]
+
+            if not 1 <= len(suffix_raw) <= 3:
+                continue
+
+            number = "".join(
+                LETTER_TO_DIGIT.get(char, char)
+                for char in number_raw
+            )
+
+            suffix = "".join(
+                DIGIT_TO_LETTER.get(char, char)
+                for char in suffix_raw
+            )
+
+            candidate = (
+                prefix
+                + number
+                + suffix
+            )
+
+            if is_valid_plate(candidate):
+                candidates.add(candidate)
+
+    return list(candidates)
+
+
 def get_onnx_providers() -> list[str]:
+
     available = ort.get_available_providers()
 
     if "CUDAExecutionProvider" in available:
@@ -98,25 +187,32 @@ detector_session = ort.InferenceSession(
 )
 
 detector_input_name = (
-    detector_session.get_inputs()[0].name
-)
-
-detector_input_shape = (
-    detector_session.get_inputs()[0].shape
-)
-
-detector_output_shape = (
-    detector_session.get_outputs()[0].shape
+    detector_session
+    .get_inputs()[0]
+    .name
 )
 
 
 paddle_ocr = PaddleOCR(
-    use_angle_cls=False,
+    use_angle_cls=True,
     lang="en",
     show_log=False,
 )
 
 paddle_lock = threading.Lock()
+
+
+def to_bgr(
+    image: np.ndarray,
+) -> np.ndarray:
+
+    if image.ndim == 2:
+        return cv2.cvtColor(
+            image,
+            cv2.COLOR_GRAY2BGR,
+        )
+
+    return image
 
 
 def make_ocr_variants(
@@ -128,17 +224,17 @@ def make_ocr_variants(
 
     height = crop.shape[0]
 
-    target_height = 128
+    target_height = 160
 
     scale = max(
         2.0,
         min(
-            5.0,
+            6.0,
             target_height / max(height, 1),
         ),
     )
 
-    resized_color = cv2.resize(
+    resized = cv2.resize(
         crop,
         None,
         fx=scale,
@@ -147,71 +243,112 @@ def make_ocr_variants(
     )
 
     gray = cv2.cvtColor(
-        resized_color,
+        resized,
         cv2.COLOR_BGR2GRAY,
     )
 
+    normalized = np.empty_like(
+        gray
+    )
+
+    cv2.normalize(
+        gray,
+        normalized,
+        0,
+        255,
+        cv2.NORM_MINMAX,
+    )
+
     clahe = cv2.createCLAHE(
-        clipLimit=1.8,
+        clipLimit=2.0,
         tileGridSize=(8, 8),
     )
 
-    clahe_image = clahe.apply(gray)
-
-    sharpen_kernel = np.array(
-        [
-            [0, -1, 0],
-            [-1, 5, -1],
-            [0, -1, 0],
-        ],
-        dtype=np.float32,
+    clahe_image = clahe.apply(
+        gray
     )
 
-    sharpen_image = cv2.filter2D(
+    denoised = cv2.bilateralFilter(
         clahe_image,
-        -1,
-        sharpen_kernel,
+        5,
+        35,
+        35,
     )
 
-    _, otsu_image = cv2.threshold(
-        clahe_image,
+    blurred = cv2.GaussianBlur(
+        denoised,
+        (0, 0),
+        1.0,
+    )
+
+    sharpened = cv2.addWeighted(
+        denoised,
+        1.6,
+        blurred,
+        -0.6,
+        0,
+    )
+
+    _, otsu = cv2.threshold(
+        sharpened,
         0,
         255,
-        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        cv2.THRESH_BINARY
+        + cv2.THRESH_OTSU,
+    )
+
+    adaptive = cv2.adaptiveThreshold(
+        sharpened,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31,
+        7,
+    )
+
+    gamma = 0.65
+
+    gamma_table = np.array(
+        [
+            ((i / 255.0) ** gamma) * 255
+            for i in range(256)
+        ],
+        dtype=np.uint8,
+    )
+
+    brightened = cv2.LUT(
+        clahe_image,
+        gamma_table,
     )
 
     return [
         (
             "original",
-            resized_color,
+            resized,
         ),
         (
-            "gray",
-            cv2.cvtColor(
-                gray,
-                cv2.COLOR_GRAY2BGR,
-            ),
+            "normalized",
+            to_bgr(normalized),
         ),
         (
             "clahe",
-            cv2.cvtColor(
-                clahe_image,
-                cv2.COLOR_GRAY2BGR,
-            ),
+            to_bgr(clahe_image),
         ),
         (
-            "sharpen",
-            cv2.cvtColor(
-                sharpen_image,
-                cv2.COLOR_GRAY2BGR,
-            ),
+            "sharpened",
+            to_bgr(sharpened),
+        ),
+        (
+            "brightened",
+            to_bgr(brightened),
         ),
         (
             "otsu",
-            cv2.cvtColor(
-                otsu_image,
-                cv2.COLOR_GRAY2BGR,
-            ),
+            to_bgr(otsu),
+        ),
+        (
+            "adaptive",
+            to_bgr(adaptive),
         ),
     ]
 
@@ -221,25 +358,42 @@ def run_paddle_ocr(
 ) -> list[tuple[str, float]]:
 
     try:
+
         with paddle_lock:
             result = paddle_ocr.ocr(
                 image,
-                cls=False,
+                cls=True,
             )
 
-        if not result or not result[0]:
+        if not result:
             return []
 
-        outputs: list[tuple[str, float]] = []
+        if not result[0]:
+            return []
+
+        outputs: list[
+            tuple[str, float]
+        ] = []
 
         for line in result[0]:
-            if not line or len(line) < 2:
+
+            if not line:
                 continue
 
-            raw_text = str(line[1][0])
-            confidence = float(line[1][1])
+            if len(line) < 2:
+                continue
 
-            cleaned = clean_text(raw_text)
+            raw_text = str(
+                line[1][0]
+            )
+
+            confidence = float(
+                line[1][1]
+            )
+
+            cleaned = clean_text(
+                raw_text
+            )
 
             if not cleaned:
                 continue
@@ -257,6 +411,7 @@ def run_paddle_ocr(
         return outputs
 
     except Exception as error:
+
         print(
             "PADDLE OCR ERROR:",
             error,
@@ -268,11 +423,16 @@ def run_paddle_ocr(
 def score_ocr_result(
     text: str,
     confidence: float,
+    corrected: bool = False,
 ) -> float:
 
-    cleaned = clean_text(text)
+    cleaned = clean_text(
+        text
+    )
 
-    score = float(confidence)
+    score = float(
+        confidence
+    )
 
     if is_valid_plate(cleaned):
         score += 1.0
@@ -286,6 +446,9 @@ def score_ocr_result(
     if len(cleaned) > 10:
         score -= 0.50
 
+    if corrected:
+        score -= 0.05
+
     return score
 
 
@@ -297,14 +460,14 @@ def recognize_plate(
         return {
             "text": "",
             "plate": "",
-            "confidence": 0.0,
         }
 
     best_text = ""
-    best_confidence = 0.0
     best_score = float("-inf")
 
-    variants = make_ocr_variants(crop)
+    variants = make_ocr_variants(
+        crop
+    )
 
     for _, variant in variants:
 
@@ -347,34 +510,48 @@ def recognize_plate(
 
         for text, confidence in results_to_check:
 
-            cleaned = clean_text(text)
+            cleaned = clean_text(
+                text
+            )
 
             if not cleaned:
                 continue
 
-            current_score = score_ocr_result(
-                cleaned,
-                confidence,
+            candidates = (
+                generate_plate_candidates(
+                    cleaned
+                )
             )
 
-            if current_score > best_score:
-                best_text = cleaned
-                best_confidence = confidence
-                best_score = current_score
+            for candidate in candidates:
+
+                corrected = (
+                    candidate != cleaned
+                )
+
+                current_score = (
+                    score_ocr_result(
+                        candidate,
+                        confidence,
+                        corrected,
+                    )
+                )
+
+                if current_score > best_score:
+
+                    best_text = candidate
+                    best_score = current_score
 
     if not best_text:
         return {
             "text": "",
             "plate": "",
-            "confidence": 0.0,
         }
 
     return {
         "text": best_text,
-        "plate": format_plate(best_text),
-        "confidence": round(
-            float(best_confidence),
-            4,
+        "plate": format_plate(
+            best_text
         ),
     }
 
@@ -382,9 +559,16 @@ def recognize_plate(
 def letterbox(
     image: np.ndarray,
     new_shape: int = IMG_SIZE,
-) -> tuple[np.ndarray, float, int, int]:
+) -> tuple[
+    np.ndarray,
+    float,
+    int,
+    int,
+]:
 
-    image_height, image_width = image.shape[:2]
+    image_height, image_width = (
+        image.shape[:2]
+    )
 
     scale = min(
         new_shape / image_height,
@@ -392,11 +576,15 @@ def letterbox(
     )
 
     resized_width = int(
-        round(image_width * scale)
+        round(
+            image_width * scale
+        )
     )
 
     resized_height = int(
-        round(image_height * scale)
+        round(
+            image_height * scale
+        )
     )
 
     resized = cv2.resize(
@@ -441,7 +629,12 @@ def letterbox(
 
 def preprocess_detector(
     image: np.ndarray,
-) -> tuple[np.ndarray, float, int, int]:
+) -> tuple[
+    np.ndarray,
+    float,
+    int,
+    int,
+]:
 
     (
         detector_image,
@@ -459,8 +652,17 @@ def preprocess_detector(
     )
 
     detector_image = (
-        detector_image.astype(np.float32)
-        / 255.0
+        detector_image.astype(
+            np.float32
+        )
+    )
+
+    np.multiply(
+        detector_image,
+        np.float32(
+            1.0 / 255.0
+        ),
+        out=detector_image,
     )
 
     detector_image = np.transpose(
@@ -473,8 +675,11 @@ def preprocess_detector(
         axis=0,
     )
 
-    detector_image = np.ascontiguousarray(
-        detector_image
+    detector_image = (
+        np.ascontiguousarray(
+            detector_image,
+            dtype=np.float32,
+        )
     )
 
     return (
@@ -487,12 +692,28 @@ def preprocess_detector(
 
 def xywh_to_xyxy(
     box: np.ndarray,
-) -> tuple[float, float, float, float]:
+) -> tuple[
+    float,
+    float,
+    float,
+    float,
+]:
 
-    center_x = float(box[0])
-    center_y = float(box[1])
-    width = float(box[2])
-    height = float(box[3])
+    center_x = float(
+        box[0]
+    )
+
+    center_y = float(
+        box[1]
+    )
+
+    width = float(
+        box[2]
+    )
+
+    height = float(
+        box[3]
+    )
 
     return (
         center_x - width / 2,
@@ -525,14 +746,29 @@ def normalize_predictions(
         4 + len(CLASS_NAMES)
     )
 
-    if predictions.shape[0] == expected_columns:
-        predictions = predictions.T
+    if (
+        predictions.shape[0]
+        == expected_columns
+    ):
 
-    elif predictions.shape[1] == expected_columns:
+        predictions = (
+            predictions.T
+        )
+
+    elif (
+        predictions.shape[1]
+        == expected_columns
+    ):
         pass
 
-    elif predictions.shape[0] < predictions.shape[1]:
-        predictions = predictions.T
+    elif (
+        predictions.shape[0]
+        < predictions.shape[1]
+    ):
+
+        predictions = (
+            predictions.T
+        )
 
     return predictions
 
@@ -563,7 +799,10 @@ def postprocess(
 
     for prediction in predictions:
 
-        if prediction.shape[0] < expected_columns:
+        if (
+            prediction.shape[0]
+            < expected_columns
+        ):
             continue
 
         class_scores = prediction[
@@ -571,28 +810,50 @@ def postprocess(
         ]
 
         class_id = int(
-            np.argmax(class_scores)
+            np.argmax(
+                class_scores
+            )
         )
 
         confidence = float(
-            class_scores[class_id]
+            class_scores[
+                class_id
+            ]
         )
 
-        threshold = get_class_threshold(
-            class_id
+        threshold = (
+            get_class_threshold(
+                class_id
+            )
         )
 
         if confidence < threshold:
             continue
 
-        x1, y1, x2, y2 = xywh_to_xyxy(
+        (
+            x1,
+            y1,
+            x2,
+            y2,
+        ) = xywh_to_xyxy(
             prediction[:4]
         )
 
-        x1 = (x1 - pad_x) / scale
-        y1 = (y1 - pad_y) / scale
-        x2 = (x2 - pad_x) / scale
-        y2 = (y2 - pad_y) / scale
+        x1 = (
+            x1 - pad_x
+        ) / scale
+
+        y1 = (
+            y1 - pad_y
+        ) / scale
+
+        x2 = (
+            x2 - pad_x
+        ) / scale
+
+        y2 = (
+            y2 - pad_y
+        ) / scale
 
         x1 = int(
             np.clip(
@@ -626,7 +887,10 @@ def postprocess(
             )
         )
 
-        if x2 <= x1 or y2 <= y1:
+        if (
+            x2 <= x1
+            or y2 <= y1
+        ):
             continue
 
         boxes.append(
@@ -638,15 +902,24 @@ def postprocess(
             ]
         )
 
-        scores.append(confidence)
-        class_ids.append(class_id)
+        scores.append(
+            confidence
+        )
+
+        class_ids.append(
+            class_id
+        )
 
     if not boxes:
         return []
 
-    detections = []
+    detections: list[
+        dict[str, Any]
+    ] = []
 
-    for class_id in sorted(set(class_ids)):
+    for class_id in sorted(
+        set(class_ids)
+    ):
 
         class_indices = [
             index
@@ -657,51 +930,72 @@ def postprocess(
 
         class_boxes = [
             boxes[index]
-            for index in class_indices
+            for index
+            in class_indices
         ]
 
         class_scores = [
             scores[index]
-            for index in class_indices
+            for index
+            in class_indices
         ]
 
-        nms_indices = cv2.dnn.NMSBoxes(
-            class_boxes,
-            class_scores,
-            get_class_threshold(class_id),
-            IOU_THRESH,
+        nms_indices = (
+            cv2.dnn.NMSBoxes(
+                class_boxes,
+                class_scores,
+                get_class_threshold(
+                    class_id
+                ),
+                IOU_THRESH,
+            )
         )
 
         if len(nms_indices) == 0:
             continue
 
-        for local_index in (
-            np.array(nms_indices).reshape(-1)
-        ):
+        indices = np.array(
+            nms_indices
+        ).reshape(-1)
 
-            global_index = class_indices[
-                int(local_index)
-            ]
+        for local_index in indices:
 
-            x, y, width, height = (
-                boxes[global_index]
+            global_index = (
+                class_indices[
+                    int(local_index)
+                ]
             )
+
+            (
+                x,
+                y,
+                width,
+                height,
+            ) = boxes[
+                global_index
+            ]
 
             detections.append(
                 {
-                    "class_id": class_ids[
-                        global_index
-                    ],
-                    "class_name": CLASS_NAMES[
+                    "class_id":
                         class_ids[
                             global_index
-                        ]
-                    ],
-                    "det_confidence": float(
-                        scores[
-                            global_index
-                        ]
-                    ),
+                        ],
+
+                    "class_name":
+                        CLASS_NAMES[
+                            class_ids[
+                                global_index
+                            ]
+                        ],
+
+                    "det_confidence":
+                        float(
+                            scores[
+                                global_index
+                            ]
+                        ),
+
                     "box": [
                         x,
                         y,
@@ -715,16 +1009,22 @@ def postprocess(
 
 
 def get_vehicle_type(
-    detections: list[dict[str, Any]],
+    detections: list[
+        dict[str, Any]
+    ],
 ) -> str:
 
     vehicle_detections = [
         detection
-        for detection in detections
-        if detection["class_name"]
+        for detection
+        in detections
+        if detection[
+            "class_name"
+        ]
         in {
-            "cars",
-            "motorcycle",
+            "mobil",
+            "motor",
+            "truk",
         }
     ]
 
@@ -734,11 +1034,15 @@ def get_vehicle_type(
     best_vehicle = max(
         vehicle_detections,
         key=lambda detection:
-            detection["det_confidence"],
+            detection[
+                "det_confidence"
+            ],
     )
 
     return str(
-        best_vehicle["class_name"]
+        best_vehicle[
+            "class_name"
+        ]
     )
 
 
@@ -751,10 +1055,10 @@ def crop_plate_for_ocr(
         image.shape[:2]
     )
 
-    x1, y1, x2, y2 = [
-        int(value)
-        for value in box
-    ]
+    x1, y1, x2, y2 = map(
+        int,
+        box,
+    )
 
     box_width = max(
         1,
@@ -766,39 +1070,17 @@ def crop_plate_for_ocr(
         y2 - y1,
     )
 
-    padding_x = int(
-        box_width * 0.12
-    )
-
-    padding_top = int(
-        box_height * 0.10
-    )
-
-    padding_bottom = int(
-        box_height * 0.05
-    )
-
     padding_x = max(
-        3,
-        min(
-            padding_x,
-            24,
-        ),
-    )
-
-    padding_top = max(
         2,
-        min(
-            padding_top,
-            14,
+        int(
+            box_width * 0.08
         ),
     )
 
-    padding_bottom = max(
-        1,
-        min(
-            padding_bottom,
-            8,
+    padding_y = max(
+        2,
+        int(
+            box_height * 0.10
         ),
     )
 
@@ -809,7 +1091,7 @@ def crop_plate_for_ocr(
 
     crop_y1 = max(
         0,
-        y1 - padding_top,
+        y1 - padding_y,
     )
 
     crop_x2 = min(
@@ -819,7 +1101,7 @@ def crop_plate_for_ocr(
 
     crop_y2 = min(
         image_height,
-        y2 + padding_bottom,
+        y2 + padding_y,
     )
 
     return image[
@@ -829,13 +1111,18 @@ def crop_plate_for_ocr(
 
 
 def select_best_plate_detection(
-    detections: list[dict[str, Any]],
+    detections: list[
+        dict[str, Any]
+    ],
 ) -> dict[str, Any] | None:
 
     plate_detections = [
         detection
-        for detection in detections
-        if detection["class_id"]
+        for detection
+        in detections
+        if detection[
+            "class_id"
+        ]
         == LICENSE_PLATE_CLASS_ID
     ]
 
@@ -845,7 +1132,9 @@ def select_best_plate_detection(
     return max(
         plate_detections,
         key=lambda detection:
-            detection["det_confidence"],
+            detection[
+                "det_confidence"
+            ],
     )
 
 
@@ -853,14 +1142,14 @@ def process_image(
     image: np.ndarray,
 ) -> dict[str, Any]:
 
-    total_start_time = time.time()
-
     (
         detector_tensor,
         scale,
         pad_x,
         pad_y,
-    ) = preprocess_detector(image)
+    ) = preprocess_detector(
+        image
+    )
 
     outputs = detector_session.run(
         None,
@@ -893,8 +1182,6 @@ def process_image(
             "status": "plate_not_detected",
             "vehicle_type": vehicle_type,
             "plate": "Plate Unreadable",
-            "raw_plate": "",
-            "processing_time_seconds": round(time.time() - total_start_time,4)
         }
 
     plate_crop = crop_plate_for_ocr(
@@ -906,21 +1193,17 @@ def process_image(
         plate_crop
     )
 
-    plate_text = (
-        ocr_result["plate"]
-        if ocr_result["text"]
-        else "Plate Unreadable"
-    )
+    if not ocr_result["text"]:
+        return {
+            "status": "plate_unreadable",
+            "vehicle_type": vehicle_type,
+            "plate": "Plate Unreadable",
+        }
 
     return {
         "status": "success",
         "vehicle_type": vehicle_type,
-        "plate": plate_text,
-        "raw_plate": ocr_result["text"],
-        "processing_time_seconds": round(
-            time.time() - total_start_time,
-            4,
-        ),
+        "plate": ocr_result["plate"],
     }
 
 
@@ -932,8 +1215,6 @@ def invalid_image_response(
         "status": "error",
         "vehicle_type": "Unknown",
         "plate": "Plate Unreadable",
-        "raw_plate": "",
-        "processing_time_seconds": 0.0,
         "error": error,
     }
 
@@ -958,19 +1239,22 @@ async def recognize(
 ):
 
     try:
-        uploaded_file = file or image
+
+        uploaded_file = (
+            file or image
+        )
 
         if uploaded_file is None:
             return JSONResponse(
                 status_code=400,
                 content=invalid_image_response(
-                    'File gambar tidak ditemukan. '
-                    'Gunakan multipart/form-data '
-                    'dengan field "file" atau "image".'
+                    "File gambar tidak ditemukan"
                 ),
             )
 
-        file_bytes = await uploaded_file.read()
+        file_bytes = await (
+            uploaded_file.read()
+        )
 
         if not file_bytes:
             return JSONResponse(
