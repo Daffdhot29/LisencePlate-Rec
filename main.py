@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import threading
 from typing import Any
 
@@ -172,7 +173,9 @@ def get_onnx_providers() -> list[str]:
             "CPUExecutionProvider",
         ]
 
-    return ["CPUExecutionProvider"]
+    return [
+        "CPUExecutionProvider"
+    ]
 
 
 if not os.path.exists(MODEL_PATH):
@@ -398,7 +401,10 @@ def run_paddle_ocr(
             if not cleaned:
                 continue
 
-            if confidence < OCR_MIN_CONFIDENCE:
+            if (
+                confidence
+                < OCR_MIN_CONFIDENCE
+            ):
                 continue
 
             outputs.append(
@@ -460,16 +466,18 @@ def recognize_plate(
         return {
             "text": "",
             "plate": "",
+            "preprocessing": "",
         }
 
     best_text = ""
     best_score = float("-inf")
+    best_preprocessing = ""
 
     variants = make_ocr_variants(
         crop
     )
 
-    for _, variant in variants:
+    for variant_name, variant in variants:
 
         ocr_results = run_paddle_ocr(
             variant
@@ -523,6 +531,9 @@ def recognize_plate(
                 )
             )
 
+            if not candidates:
+                continue
+
             for candidate in candidates:
 
                 corrected = (
@@ -537,22 +548,41 @@ def recognize_plate(
                     )
                 )
 
-                if current_score > best_score:
+                if (
+                    current_score
+                    > best_score
+                ):
 
-                    best_text = candidate
-                    best_score = current_score
+                    best_text = (
+                        candidate
+                    )
+
+                    best_score = (
+                        current_score
+                    )
+
+                    best_preprocessing = (
+                        variant_name
+                    )
 
     if not best_text:
         return {
             "text": "",
             "plate": "",
+            "preprocessing": "",
         }
 
     return {
-        "text": best_text,
-        "plate": format_plate(
-            best_text
-        ),
+        "text":
+            best_text,
+
+        "plate":
+            format_plate(
+                best_text
+            ),
+
+        "preprocessing":
+            best_preprocessing,
     }
 
 
@@ -607,16 +637,21 @@ def letterbox(
     )
 
     pad_x = (
-        new_shape - resized_width
+        new_shape
+        - resized_width
     ) // 2
 
     pad_y = (
-        new_shape - resized_height
+        new_shape
+        - resized_height
     ) // 2
 
     canvas[
-        pad_y:pad_y + resized_height,
-        pad_x:pad_x + resized_width,
+        pad_y:
+        pad_y + resized_height,
+
+        pad_x:
+        pad_x + resized_width,
     ] = resized
 
     return (
@@ -727,7 +762,10 @@ def get_class_threshold(
     class_id: int,
 ) -> float:
 
-    if class_id == LICENSE_PLATE_CLASS_ID:
+    if (
+        class_id
+        == LICENSE_PLATE_CLASS_ID
+    ):
         return PLATE_CONF_THRESH
 
     return VEHICLE_CONF_THRESH
@@ -740,7 +778,9 @@ def normalize_predictions(
     predictions = output
 
     if predictions.ndim == 3:
-        predictions = predictions[0]
+        predictions = (
+            predictions[0]
+        )
 
     expected_columns = (
         4 + len(CLASS_NAMES)
@@ -781,17 +821,27 @@ def postprocess(
     pad_y: int,
 ) -> list[dict[str, Any]]:
 
-    predictions = normalize_predictions(
-        outputs[0]
+    predictions = (
+        normalize_predictions(
+            outputs[0]
+        )
     )
 
     image_height, image_width = (
         original_image.shape[:2]
     )
 
-    boxes: list[list[int]] = []
-    scores: list[float] = []
-    class_ids: list[int] = []
+    boxes: list[
+        list[int]
+    ] = []
+
+    scores: list[
+        float
+    ] = []
+
+    class_ids: list[
+        int
+    ] = []
 
     expected_columns = (
         4 + len(CLASS_NAMES)
@@ -806,7 +856,8 @@ def postprocess(
             continue
 
         class_scores = prediction[
-            4:4 + len(CLASS_NAMES)
+            4:
+            4 + len(CLASS_NAMES)
         ]
 
         class_id = int(
@@ -1142,6 +1193,8 @@ def process_image(
     image: np.ndarray,
 ) -> dict[str, Any]:
 
+    start_time = time.perf_counter()
+
     (
         detector_tensor,
         scale,
@@ -1178,32 +1231,96 @@ def process_image(
     )
 
     if plate_detection is None:
+
+        processing_time = (
+            time.perf_counter()
+            - start_time
+        )
+
         return {
-            "status": "plate_not_detected",
-            "vehicle_type": vehicle_type,
-            "plate": "Plate Unreadable",
+            "status":
+                "plate_not_detected",
+
+            "vehicle_type":
+                vehicle_type,
+
+            "plate":
+                "Plate Unreadable",
+
+            "preprocessing":
+                "",
+
+            "time":
+                round(
+                    processing_time,
+                    3,
+                ),
         }
 
-    plate_crop = crop_plate_for_ocr(
-        image,
-        plate_detection["box"],
+    plate_crop = (
+        crop_plate_for_ocr(
+            image,
+            plate_detection[
+                "box"
+            ],
+        )
     )
 
-    ocr_result = recognize_plate(
-        plate_crop
+    ocr_result = (
+        recognize_plate(
+            plate_crop
+        )
+    )
+
+    processing_time = (
+        time.perf_counter()
+        - start_time
     )
 
     if not ocr_result["text"]:
+
         return {
-            "status": "plate_unreadable",
-            "vehicle_type": vehicle_type,
-            "plate": "Plate Unreadable",
+            "status":
+                "plate_unreadable",
+
+            "vehicle_type":
+                vehicle_type,
+
+            "plate":
+                "Plate Unreadable",
+
+            "preprocessing":
+                "",
+
+            "time":
+                round(
+                    processing_time,
+                    3,
+                ),
         }
 
     return {
-        "status": "success",
-        "vehicle_type": vehicle_type,
-        "plate": ocr_result["plate"],
+        "status":
+            "success",
+
+        "vehicle_type":
+            vehicle_type,
+
+        "plate":
+            ocr_result[
+                "plate"
+            ],
+
+        "preprocessing":
+            ocr_result[
+                "preprocessing"
+            ],
+
+        "time":
+            round(
+                processing_time,
+                3,
+            ),
     }
 
 
@@ -1212,10 +1329,17 @@ def invalid_image_response(
 ) -> dict[str, Any]:
 
     return {
-        "status": "error",
-        "vehicle_type": "Unknown",
-        "plate": "Plate Unreadable",
-        "error": error,
+        "status":
+            "error",
+
+        "vehicle_type":
+            "Unknown",
+
+        "plate":
+            "Plate Unreadable",
+
+        "error":
+            error,
     }
 
 
@@ -1223,12 +1347,23 @@ def invalid_image_response(
 def root() -> dict[str, Any]:
 
     return {
-        "message": "ALPR API is running",
-        "endpoint": "POST /recognize",
-        "detector": "YOLOv9-tiny ONNX",
-        "model": MODEL_PATH,
-        "img_size": IMG_SIZE,
-        "ocr": "PaddleOCR",
+        "message":
+            "ALPR API is running",
+
+        "endpoint":
+            "POST /recognize",
+
+        "detector":
+            "YOLOv9-tiny ONNX",
+
+        "model":
+            MODEL_PATH,
+
+        "img_size":
+            IMG_SIZE,
+
+        "ocr":
+            "PaddleOCR",
     }
 
 
@@ -1245,10 +1380,13 @@ async def recognize(
         )
 
         if uploaded_file is None:
+
             return JSONResponse(
                 status_code=400,
-                content=invalid_image_response(
-                    "File gambar tidak ditemukan"
+                content=(
+                    invalid_image_response(
+                        "File gambar tidak ditemukan"
+                    )
                 ),
             )
 
@@ -1257,10 +1395,13 @@ async def recognize(
         )
 
         if not file_bytes:
+
             return JSONResponse(
                 status_code=400,
-                content=invalid_image_response(
-                    "File kosong"
+                content=(
+                    invalid_image_response(
+                        "File kosong"
+                    )
                 ),
             )
 
@@ -1275,10 +1416,13 @@ async def recognize(
         )
 
         if decoded_image is None:
+
             return JSONResponse(
                 status_code=400,
-                content=invalid_image_response(
-                    "File bukan gambar valid"
+                content=(
+                    invalid_image_response(
+                        "File bukan gambar valid"
+                    )
                 ),
             )
 
@@ -1300,7 +1444,9 @@ async def recognize(
 
         return JSONResponse(
             status_code=500,
-            content=invalid_image_response(
-                str(error)
+            content=(
+                invalid_image_response(
+                    str(error)
+                )
             ),
         )
