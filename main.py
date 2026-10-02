@@ -2,6 +2,8 @@ import os
 import re
 import time
 import threading
+
+from collections import defaultdict
 from typing import Any
 
 import cv2
@@ -23,7 +25,10 @@ IMG_SIZE = 640
 PLATE_CONF_THRESH = 0.20
 VEHICLE_CONF_THRESH = 0.25
 IOU_THRESH = 0.45
+
 OCR_MIN_CONFIDENCE = 0.25
+OCR_FAST_CONFIDENCE = 0.80
+OCR_FAST_VOTES = 2
 
 LICENSE_PLATE_CLASS_ID = 2
 
@@ -38,6 +43,7 @@ PLATE_PATTERN = re.compile(
     r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$"
 )
 
+
 LETTER_TO_DIGIT = {
     "O": "0",
     "Q": "0",
@@ -50,6 +56,7 @@ LETTER_TO_DIGIT = {
     "B": "8",
 }
 
+
 DIGIT_TO_LETTER = {
     "0": "O",
     "1": "I",
@@ -61,6 +68,7 @@ DIGIT_TO_LETTER = {
 
 
 def clean_text(text: str) -> str:
+
     return re.sub(
         r"[^A-Z0-9]",
         "",
@@ -69,6 +77,7 @@ def clean_text(text: str) -> str:
 
 
 def is_valid_plate(text: str) -> bool:
+
     return (
         PLATE_PATTERN.fullmatch(
             clean_text(text)
@@ -78,6 +87,7 @@ def is_valid_plate(text: str) -> bool:
 
 
 def format_plate(text: str) -> str:
+
     cleaned = clean_text(text)
 
     match = re.fullmatch(
@@ -97,14 +107,16 @@ def format_plate(text: str) -> str:
 
 def generate_plate_candidates(
     text: str,
-) -> list[str]:
+) -> list[tuple[str, bool]]:
 
     text = clean_text(text)
 
     if not text:
         return []
 
-    candidates = {text}
+    candidates = {
+        text: False
+    }
 
     for prefix_len in (1, 2):
 
@@ -114,7 +126,10 @@ def generate_plate_candidates(
         prefix_raw = text[:prefix_len]
 
         prefix = "".join(
-            DIGIT_TO_LETTER.get(char, char)
+            DIGIT_TO_LETTER.get(
+                char,
+                char
+            )
             for char in prefix_raw
         )
 
@@ -124,7 +139,8 @@ def generate_plate_candidates(
         for number_len in range(1, 5):
 
             suffix_start = (
-                prefix_len + number_len
+                prefix_len
+                + number_len
             )
 
             if suffix_start >= len(text):
@@ -142,12 +158,18 @@ def generate_plate_candidates(
                 continue
 
             number = "".join(
-                LETTER_TO_DIGIT.get(char, char)
+                LETTER_TO_DIGIT.get(
+                    char,
+                    char
+                )
                 for char in number_raw
             )
 
             suffix = "".join(
-                DIGIT_TO_LETTER.get(char, char)
+                DIGIT_TO_LETTER.get(
+                    char,
+                    char
+                )
                 for char in suffix_raw
             )
 
@@ -158,16 +180,36 @@ def generate_plate_candidates(
             )
 
             if is_valid_plate(candidate):
-                candidates.add(candidate)
 
-    return list(candidates)
+                corrected = (
+                    candidate != text
+                )
+
+                if candidate not in candidates:
+
+                    candidates[
+                        candidate
+                    ] = corrected
+
+                elif not corrected:
+
+                    candidates[
+                        candidate
+                    ] = False
+
+    return list(
+        candidates.items()
+    )
 
 
 def get_onnx_providers() -> list[str]:
 
-    available = ort.get_available_providers()
+    available = (
+        ort.get_available_providers()
+    )
 
     if "CUDAExecutionProvider" in available:
+
         return [
             "CUDAExecutionProvider",
             "CPUExecutionProvider",
@@ -179,6 +221,7 @@ def get_onnx_providers() -> list[str]:
 
 
 if not os.path.exists(MODEL_PATH):
+
     raise FileNotFoundError(
         f"Model ONNX tidak ditemukan: {MODEL_PATH}"
     )
@@ -188,6 +231,7 @@ detector_session = ort.InferenceSession(
     MODEL_PATH,
     providers=get_onnx_providers(),
 )
+
 
 detector_input_name = (
     detector_session
@@ -202,6 +246,7 @@ paddle_ocr = PaddleOCR(
     show_log=False,
 )
 
+
 paddle_lock = threading.Lock()
 
 
@@ -210,6 +255,7 @@ def to_bgr(
 ) -> np.ndarray:
 
     if image.ndim == 2:
+
         return cv2.cvtColor(
             image,
             cv2.COLOR_GRAY2BGR,
@@ -233,7 +279,10 @@ def make_ocr_variants(
         2.0,
         min(
             6.0,
-            target_height / max(height, 1),
+            target_height / max(
+                height,
+                1
+            ),
         ),
     )
 
@@ -330,28 +379,40 @@ def make_ocr_variants(
             resized,
         ),
         (
-            "normalized",
-            to_bgr(normalized),
-        ),
-        (
             "clahe",
-            to_bgr(clahe_image),
+            to_bgr(
+                clahe_image
+            ),
         ),
         (
             "sharpened",
-            to_bgr(sharpened),
+            to_bgr(
+                sharpened
+            ),
+        ),
+        (
+            "normalized",
+            to_bgr(
+                normalized
+            ),
         ),
         (
             "brightened",
-            to_bgr(brightened),
+            to_bgr(
+                brightened
+            ),
         ),
         (
             "otsu",
-            to_bgr(otsu),
+            to_bgr(
+                otsu
+            ),
         ),
         (
             "adaptive",
-            to_bgr(adaptive),
+            to_bgr(
+                adaptive
+            ),
         ),
     ]
 
@@ -363,6 +424,7 @@ def run_paddle_ocr(
     try:
 
         with paddle_lock:
+
             result = paddle_ocr.ocr(
                 image,
                 cls=True,
@@ -440,8 +502,10 @@ def score_ocr_result(
         confidence
     )
 
-    if is_valid_plate(cleaned):
-        score += 1.0
+    if is_valid_plate(
+        cleaned
+    ):
+        score += 0.25
 
     if 6 <= len(cleaned) <= 9:
         score += 0.10
@@ -453,7 +517,7 @@ def score_ocr_result(
         score -= 0.50
 
     if corrected:
-        score -= 0.05
+        score -= 0.10
 
     return score
 
@@ -463,21 +527,32 @@ def recognize_plate(
 ) -> dict[str, Any]:
 
     if crop is None or crop.size == 0:
+
         return {
             "text": "",
             "plate": "",
             "preprocessing": "",
         }
 
-    best_text = ""
-    best_score = float("-inf")
-    best_preprocessing = ""
-
     variants = make_ocr_variants(
         crop
     )
 
-    for variant_name, variant in variants:
+    candidate_data = defaultdict(
+        lambda: {
+            "votes": 0,
+            "confidence_sum": 0.0,
+            "score_sum": 0.0,
+            "best_confidence": 0.0,
+            "best_preprocessing": "",
+            "variants": set(),
+        }
+    )
+
+    for variant_index, (
+        variant_name,
+        variant,
+    ) in enumerate(variants):
 
         ocr_results = run_paddle_ocr(
             variant
@@ -506,7 +581,9 @@ def recognize_plate(
                     for _, confidence
                     in ocr_results
                 )
-                / len(ocr_results)
+                / len(
+                    ocr_results
+                )
             )
 
             results_to_check.append(
@@ -515,6 +592,8 @@ def recognize_plate(
                     average_confidence,
                 )
             )
+
+        variant_candidates = {}
 
         for text, confidence in results_to_check:
 
@@ -534,11 +613,12 @@ def recognize_plate(
             if not candidates:
                 continue
 
-            for candidate in candidates:
+            for candidate, corrected in candidates:
 
-                corrected = (
-                    candidate != cleaned
-                )
+                if not is_valid_plate(
+                    candidate
+                ):
+                    continue
 
                 current_score = (
                     score_ocr_result(
@@ -548,29 +628,169 @@ def recognize_plate(
                     )
                 )
 
-                if (
-                    current_score
-                    > best_score
-                ):
-
-                    best_text = (
+                previous = (
+                    variant_candidates.get(
                         candidate
                     )
+                )
 
-                    best_score = (
-                        current_score
+                if (
+                    previous is None
+                    or current_score
+                    > previous["score"]
+                ):
+
+                    variant_candidates[
+                        candidate
+                    ] = {
+                        "confidence":
+                            confidence,
+
+                        "score":
+                            current_score,
+
+                        "corrected":
+                            corrected,
+                    }
+
+        for (
+            candidate,
+            candidate_result,
+        ) in variant_candidates.items():
+
+            data = candidate_data[
+                candidate
+            ]
+
+            if (
+                variant_name
+                not in data["variants"]
+            ):
+
+                data[
+                    "variants"
+                ].add(
+                    variant_name
+                )
+
+                data["votes"] += 1
+
+            data[
+                "confidence_sum"
+            ] += candidate_result[
+                "confidence"
+            ]
+
+            data[
+                "score_sum"
+            ] += candidate_result[
+                "score"
+            ]
+
+            if (
+                candidate_result[
+                    "confidence"
+                ]
+                > data[
+                    "best_confidence"
+                ]
+            ):
+
+                data[
+                    "best_confidence"
+                ] = candidate_result[
+                    "confidence"
+                ]
+
+                data[
+                    "best_preprocessing"
+                ] = variant_name
+
+        if variant_index >= 1:
+
+            fast_candidates = [
+                (
+                    candidate,
+                    data,
+                )
+                for candidate, data
+                in candidate_data.items()
+                if (
+                    data["votes"]
+                    >= OCR_FAST_VOTES
+                    and
+                    (
+                        data[
+                            "confidence_sum"
+                        ]
+                        / data[
+                            "votes"
+                        ]
                     )
+                    >= OCR_FAST_CONFIDENCE
+                )
+            ]
 
-                    best_preprocessing = (
-                        variant_name
-                    )
+            if fast_candidates:
 
-    if not best_text:
+                best_candidate, best_data = max(
+                    fast_candidates,
+                    key=lambda item: (
+                        item[1]["votes"],
+                        (
+                            item[1][
+                                "confidence_sum"
+                            ]
+                            / item[1][
+                                "votes"
+                            ]
+                        ),
+                        item[1][
+                            "score_sum"
+                        ],
+                    ),
+                )
+
+                return {
+                    "text":
+                        best_candidate,
+
+                    "plate":
+                        format_plate(
+                            best_candidate
+                        ),
+
+                    "preprocessing":
+                        best_data[
+                            "best_preprocessing"
+                        ],
+                }
+
+    if not candidate_data:
+
         return {
             "text": "",
             "plate": "",
             "preprocessing": "",
         }
+
+    best_text, best_data = max(
+        candidate_data.items(),
+        key=lambda item: (
+            item[1]["votes"],
+            (
+                item[1][
+                    "confidence_sum"
+                ]
+                / item[1][
+                    "votes"
+                ]
+            ),
+            item[1][
+                "score_sum"
+            ],
+        ),
+    )
 
     return {
         "text":
@@ -582,7 +802,9 @@ def recognize_plate(
             ),
 
         "preprocessing":
-            best_preprocessing,
+            best_data[
+                "best_preprocessing"
+            ],
     }
 
 
@@ -778,6 +1000,7 @@ def normalize_predictions(
     predictions = output
 
     if predictions.ndim == 3:
+
         predictions = (
             predictions[0]
         )
@@ -1369,29 +1592,13 @@ def root() -> dict[str, Any]:
 
 @app.post("/recognize")
 async def recognize(
-    file: UploadFile | None = File(None),
-    image: UploadFile | None = File(None),
+    image: UploadFile = File(...)
 ):
 
     try:
 
-        uploaded_file = (
-            file or image
-        )
-
-        if uploaded_file is None:
-
-            return JSONResponse(
-                status_code=400,
-                content=(
-                    invalid_image_response(
-                        "File gambar tidak ditemukan"
-                    )
-                ),
-            )
-
         file_bytes = await (
-            uploaded_file.read()
+            image.read()
         )
 
         if not file_bytes:
