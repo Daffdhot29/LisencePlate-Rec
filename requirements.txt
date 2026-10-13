@@ -1,9 +1,13 @@
-easyocr==1.7.2
-fastapi==0.134.0
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
 numpy==1.26.4
-opencv-python-headless==4.10.0.84
-python-multipart==0.0.22
-torch==2.5.1
-torchvision==0.20.1
-ultralytics
-uvicorn[standard]
+opencv-python-headless==4.11.0.86
+# Ganti ke onnxruntime-gpu kalau mau pakai GPU NVIDIA (CUDA)
+onnxruntime==1.30.0
+# Paddle 2.6 nge-hang di Mac ARM, pakai 3.0
+paddlepaddle==3.0.0
+# main.py pakai API PaddleOCR 2.x (show_log, cls=True), jangan naik ke 3.x
+paddleocr==2.10.0
+# OCR khusus plat (model di-download otomatis waktu start pertama)
+fast-plate-ocr[onnx]==1.1.0

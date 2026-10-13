@@ -12,6 +12,7 @@ import onnxruntime as ort
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
+from fast_plate_ocr import LicensePlateRecognizer
 from paddleocr import PaddleOCR
 
 
@@ -19,6 +20,14 @@ app = FastAPI(title="LPR API")
 
 
 MODEL_PATH = "models/LPR_MAX.onnx"
+
+# Detektor plat Indonesia (YOLO11n, MIT) dari
+# https://huggingface.co/carlravel/indonesian-plate-detector-yolo11
+# LPR_MAX sering ngasih kotak "plat" seukuran mobil, model ini nggak.
+PLATE_DETECTOR_PATH = "models/plate_detector_yolo11n.onnx"
+PLATE_DETECTOR_CONF_THRESH = 0.25
+
+PLATE_OCR_PADDING = 0.03
 
 IMG_SIZE = 640
 
@@ -32,6 +41,12 @@ OCR_FAST_VOTES = 2
 
 LICENSE_PLATE_CLASS_ID = 2
 
+PLATE_MIN_ASPECT = 1.3
+PLATE_MAX_ASPECT = 6.0
+PLATE_MAX_AREA_RATIO = 0.15
+
+OCR_SAME_ROW_MIN_HEIGHT = 0.6
+
 CLASS_NAMES = [
     "mobil",
     "motor",
@@ -40,7 +55,28 @@ CLASS_NAMES = [
 ]
 
 PLATE_PATTERN = re.compile(
-    r"^[A-Z]{1,2}[0-9]{1,4}[A-Z]{1,3}$"
+    r"^([A-Z]{1,2})([1-9][0-9]{0,3})([A-Z]{1,3})$"
+)
+
+# Kode wilayah plat Indonesia (plus RI/CD/CC buat dinas & diplomat).
+# Dipakai buat nolak hasil OCR yang "dikarang", misal 1601 -> I 6 OI.
+REGION_CODES = {
+    "A", "B", "D", "E", "F", "G", "H", "K", "L", "M",
+    "N", "P", "R", "S", "T", "W", "Z",
+    "AA", "AB", "AD", "AE", "AG",
+    "BA", "BB", "BD", "BE", "BG", "BH", "BK", "BL",
+    "BM", "BN", "BP",
+    "DA", "DB", "DC", "DD", "DE", "DG", "DH", "DK",
+    "DL", "DM", "DN", "DR", "DS", "DT", "DW",
+    "EA", "EB", "ED",
+    "KB", "KH", "KT", "KU",
+    "PA", "PB", "PG", "PS", "PT",
+    "RI", "CD", "CC",
+}
+
+PLATE_OCR_MODELS = (
+    "cct-s-v2-global-model",
+    "cct-xs-v2-global-model",
 )
 
 
@@ -78,11 +114,14 @@ def clean_text(text: str) -> str:
 
 def is_valid_plate(text: str) -> bool:
 
+    match = PLATE_PATTERN.fullmatch(
+        clean_text(text)
+    )
+
     return (
-        PLATE_PATTERN.fullmatch(
-            clean_text(text)
-        )
-        is not None
+        match is not None
+        and match.group(1)
+        in REGION_CODES
     )
 
 
@@ -240,6 +279,26 @@ detector_input_name = (
 )
 
 
+if not os.path.exists(PLATE_DETECTOR_PATH):
+
+    raise FileNotFoundError(
+        f"Model ONNX tidak ditemukan: {PLATE_DETECTOR_PATH}"
+    )
+
+
+plate_detector_session = ort.InferenceSession(
+    PLATE_DETECTOR_PATH,
+    providers=get_onnx_providers(),
+)
+
+
+plate_detector_input_name = (
+    plate_detector_session
+    .get_inputs()[0]
+    .name
+)
+
+
 paddle_ocr = PaddleOCR(
     use_angle_cls=True,
     lang="en",
@@ -248,6 +307,17 @@ paddle_ocr = PaddleOCR(
 
 
 paddle_lock = threading.Lock()
+
+
+# OCR khusus plat. PaddleOCR sering ngilangin huruf wilayah
+# yang berdiri sendiri di kiri (L 1601 TS kebaca 1601 TS).
+plate_ocr_models = [
+    LicensePlateRecognizer(
+        model_name
+    )
+    for model_name
+    in PLATE_OCR_MODELS
+]
 
 
 def to_bgr(
@@ -419,7 +489,7 @@ def make_ocr_variants(
 
 def run_paddle_ocr(
     image: np.ndarray,
-) -> list[tuple[str, float]]:
+) -> list[tuple[str, float, np.ndarray]]:
 
     try:
 
@@ -437,7 +507,7 @@ def run_paddle_ocr(
             return []
 
         outputs: list[
-            tuple[str, float]
+            tuple[str, float, np.ndarray]
         ] = []
 
         for line in result[0]:
@@ -473,6 +543,10 @@ def run_paddle_ocr(
                 (
                     cleaned,
                     confidence,
+                    np.asarray(
+                        line[0],
+                        dtype=np.float32,
+                    ),
                 )
             )
 
@@ -486,6 +560,67 @@ def run_paddle_ocr(
         )
 
         return []
+
+
+def select_plate_row(
+    ocr_results: list[
+        tuple[str, float, np.ndarray]
+    ],
+) -> list[tuple[str, float, np.ndarray]]:
+
+    # Ambil potongan teks yang sebaris dengan teks paling tinggi
+    # (nomor plat), urut kiri ke kanan. Baris masa berlaku yang
+    # lebih kecil di bawahnya ikut kebuang.
+    if not ocr_results:
+        return []
+
+    def line_height(
+        box: np.ndarray,
+    ) -> float:
+
+        return float(
+            box[:, 1].max()
+            - box[:, 1].min()
+        )
+
+    anchor_box = max(
+        ocr_results,
+        key=lambda item:
+            line_height(item[2]),
+    )[2]
+
+    anchor_top = float(
+        anchor_box[:, 1].min()
+    )
+
+    anchor_bottom = float(
+        anchor_box[:, 1].max()
+    )
+
+    anchor_height = max(
+        1.0,
+        anchor_bottom - anchor_top,
+    )
+
+    row_results = [
+        item
+        for item
+        in ocr_results
+        if (
+            line_height(item[2])
+            >= anchor_height
+            * OCR_SAME_ROW_MIN_HEIGHT
+            and anchor_top
+            <= float(item[2][:, 1].mean())
+            <= anchor_bottom
+        )
+    ]
+
+    return sorted(
+        row_results,
+        key=lambda item:
+            float(item[2][:, 0].min()),
+    )
 
 
 def score_ocr_result(
@@ -561,28 +696,37 @@ def recognize_plate(
         if not ocr_results:
             continue
 
-        results_to_check = list(
+        results_to_check = [
+            (
+                text,
+                confidence,
+            )
+            for text, confidence, _
+            in ocr_results
+        ]
+
+        row_results = select_plate_row(
             ocr_results
         )
 
-        if len(ocr_results) > 1:
+        if len(row_results) > 1:
 
             joined_text = clean_text(
                 "".join(
                     text
-                    for text, _
-                    in ocr_results
+                    for text, _, _
+                    in row_results
                 )
             )
 
             average_confidence = (
                 sum(
                     confidence
-                    for _, confidence
-                    in ocr_results
+                    for _, confidence, _
+                    in row_results
                 )
                 / len(
-                    ocr_results
+                    row_results
                 )
             )
 
@@ -1384,10 +1528,52 @@ def crop_plate_for_ocr(
     ]
 
 
+def is_plate_shaped(
+    box: list[int],
+    image_shape: tuple[int, ...],
+) -> bool:
+
+    image_height, image_width = (
+        image_shape[:2]
+    )
+
+    x1, y1, x2, y2 = box
+
+    box_width = max(
+        1,
+        x2 - x1,
+    )
+
+    box_height = max(
+        1,
+        y2 - y1,
+    )
+
+    aspect_ratio = (
+        box_width
+        / box_height
+    )
+
+    area_ratio = (
+        box_width * box_height
+    ) / (
+        image_width * image_height
+    )
+
+    return (
+        PLATE_MIN_ASPECT
+        <= aspect_ratio
+        <= PLATE_MAX_ASPECT
+        and area_ratio
+        <= PLATE_MAX_AREA_RATIO
+    )
+
+
 def select_best_plate_detection(
     detections: list[
         dict[str, Any]
     ],
+    image_shape: tuple[int, ...],
 ) -> dict[str, Any] | None:
 
     plate_detections = [
@@ -1403,6 +1589,21 @@ def select_best_plate_detection(
     if not plate_detections:
         return None
 
+    # Model sering ngasih label plat ke kotak seukuran mobil.
+    # Kalau ada kotak yang bentuknya beneran plat, pakai itu.
+    plate_shaped = [
+        detection
+        for detection
+        in plate_detections
+        if is_plate_shaped(
+            detection["box"],
+            image_shape,
+        )
+    ]
+
+    if plate_shaped:
+        plate_detections = plate_shaped
+
     return max(
         plate_detections,
         key=lambda detection:
@@ -1410,6 +1611,217 @@ def select_best_plate_detection(
                 "det_confidence"
             ],
     )
+
+
+def recognize_plate_with_plate_ocr(
+    image: np.ndarray,
+    box: list[int],
+) -> dict[str, Any] | None:
+
+    image_height, image_width = (
+        image.shape[:2]
+    )
+
+    x1, y1, x2, y2 = box
+
+    padding_x = int(
+        (x2 - x1)
+        * PLATE_OCR_PADDING
+    )
+
+    padding_y = int(
+        (y2 - y1)
+        * PLATE_OCR_PADDING
+    )
+
+    plate_crop = image[
+        max(0, y1 - padding_y):
+        min(image_height, y2 + padding_y),
+        max(0, x1 - padding_x):
+        min(image_width, x2 + padding_x),
+    ]
+
+    if plate_crop.size == 0:
+        return None
+
+    best_text = ""
+    best_confidence = 0.0
+
+    for model in plate_ocr_models:
+
+        prediction = model.run(
+            plate_crop,
+            return_confidence=True,
+        )[0]
+
+        text = clean_text(
+            prediction.plate
+        )
+
+        confidence = float(
+            np.mean(
+                prediction.char_probs
+            )
+        )
+
+        if (
+            is_valid_plate(text)
+            and confidence
+            > best_confidence
+        ):
+
+            best_text = text
+            best_confidence = confidence
+
+    if not best_text:
+        return None
+
+    return {
+        "text":
+            best_text,
+        "plate":
+            format_plate(
+                best_text
+            ),
+        "preprocessing":
+            "plate_ocr",
+    }
+
+
+def locate_plate_by_text(
+    image: np.ndarray,
+    box: list[int],
+) -> list[int] | None:
+
+    image_height, image_width = (
+        image.shape[:2]
+    )
+
+    x1, y1, x2, y2 = box
+
+    region = np.ascontiguousarray(
+        image[y1:y2, x1:x2]
+    )
+
+    if region.size == 0:
+        return None
+
+    plate_lines = []
+
+    for text, _, line_box in run_paddle_ocr(
+        region
+    ):
+
+        digit_count = sum(
+            char.isdigit()
+            for char in text
+        )
+
+        # Baris plat: ada huruf dan minimal 2 angka.
+        # Tulisan lain (DILARANG, WARNING, merk) kebuang.
+        if (
+            len(text) >= 4
+            and digit_count >= 2
+            and any(
+                char.isalpha()
+                for char in text
+            )
+        ):
+
+            plate_lines.append(
+                line_box
+            )
+
+    if not plate_lines:
+        return None
+
+    line_box = max(
+        plate_lines,
+        key=lambda item:
+            float(np.ptp(item[:, 1])),
+    )
+
+    line_x1, line_y1 = line_box.min(axis=0)
+    line_x2, line_y2 = line_box.max(axis=0)
+
+    line_width = line_x2 - line_x1
+    line_height = line_y2 - line_y1
+
+    # Lebarin ke ukuran plat utuh (baris masa berlaku di bawah).
+    return [
+        int(max(0, x1 + line_x1 - 0.08 * line_width)),
+        int(max(0, y1 + line_y1 - 0.25 * line_height)),
+        int(min(image_width, x1 + line_x2 + 0.08 * line_width)),
+        int(min(image_height, y1 + line_y2 + 0.60 * line_height)),
+    ]
+
+
+def detect_plate(
+    detector_tensor: np.ndarray,
+    image: np.ndarray,
+    scale: float,
+    pad_x: int,
+    pad_y: int,
+) -> dict[str, Any] | None:
+
+    # Output model: [1, 5, 8400] -> (cx, cy, w, h, score)
+    predictions = plate_detector_session.run(
+        None,
+        {
+            plate_detector_input_name:
+                detector_tensor
+        },
+    )[0][0].T
+
+    predictions = predictions[
+        predictions[:, 4]
+        >= PLATE_DETECTOR_CONF_THRESH
+    ]
+
+    if len(predictions) == 0:
+        return None
+
+    image_height, image_width = (
+        image.shape[:2]
+    )
+
+    best = predictions[
+        int(
+            np.argmax(
+                predictions[:, 4]
+            )
+        )
+    ]
+
+    x1, y1, x2, y2 = xywh_to_xyxy(
+        best[:4]
+    )
+
+    box = [
+        int(np.clip(round((x1 - pad_x) / scale), 0, image_width - 1)),
+        int(np.clip(round((y1 - pad_y) / scale), 0, image_height - 1)),
+        int(np.clip(round((x2 - pad_x) / scale), 0, image_width)),
+        int(np.clip(round((y2 - pad_y) / scale), 0, image_height)),
+    ]
+
+    if (
+        box[2] <= box[0]
+        or box[3] <= box[1]
+    ):
+        return None
+
+    return {
+        "class_id":
+            LICENSE_PLATE_CLASS_ID,
+        "class_name":
+            CLASS_NAMES[
+                LICENSE_PLATE_CLASS_ID
+            ],
+        "det_confidence":
+            float(best[4]),
+        "box":
+            box,
+    }
 
 
 def process_image(
@@ -1447,11 +1859,22 @@ def process_image(
         detections
     )
 
-    plate_detection = (
-        select_best_plate_detection(
-            detections
-        )
+    plate_detection = detect_plate(
+        detector_tensor,
+        image,
+        scale,
+        pad_x,
+        pad_y,
     )
+
+    if plate_detection is None:
+
+        plate_detection = (
+            select_best_plate_detection(
+                detections,
+                image.shape,
+            )
+        )
 
     if plate_detection is None:
 
@@ -1489,11 +1912,48 @@ def process_image(
         )
     )
 
-    ocr_result = (
-        recognize_plate(
-            plate_crop
+    ocr_result = None
+
+    # Model OCR plat cuma akurat kalau crop-nya pas di plat,
+    # jadi cuma dipakai kalau kotak YOLO-nya bentuk plat.
+    if is_plate_shaped(
+        plate_detection["box"],
+        image.shape,
+    ):
+
+        ocr_result = (
+            recognize_plate_with_plate_ocr(
+                image,
+                plate_detection["box"],
+            )
         )
-    )
+
+    else:
+
+        # Kotak seukuran mobil: cari baris nomor plat di dalamnya
+        # pakai detektor teks Paddle (tahan plat miring), lalu
+        # baca pakai OCR plat.
+        text_plate_box = locate_plate_by_text(
+            image,
+            plate_detection["box"],
+        )
+
+        if text_plate_box is not None:
+
+            ocr_result = (
+                recognize_plate_with_plate_ocr(
+                    image,
+                    text_plate_box,
+                )
+            )
+
+    if ocr_result is None:
+
+        ocr_result = (
+            recognize_plate(
+                plate_crop
+            )
+        )
 
     processing_time = (
         time.perf_counter()
